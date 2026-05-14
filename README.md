@@ -1,6 +1,6 @@
-# Software
+# µCell BB Drivers
 
-Folder containing custom/forked software components, as well as build scripts and documentation for the software side of the project.
+Separate repo for the µCell baseband drivers, which are used in the µCell firmware and other projects. This repo is a submodule of the main µCell repo, but can also be used independently for other projects that require the same drivers.
 
 ## License & Acknowledgements
 
