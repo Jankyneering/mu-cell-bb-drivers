@@ -28,6 +28,13 @@ extern const char *SoapyMuCell_commit;
 
 #include "eeprom_auth.hpp"
 
+#define DRIVER_KEY_STR "mucell"
+#define HARDWARE_KEY_STR "mucell"
+#define DEVICE_LABEL_STR "mucell"
+#define DEVICE_DRIVER_STR "mucell"
+#define REGISTER_STR "mucell"
+
+
 // Streaming mode, affecting how starting, stopping, overruns and underruns
 // are handled.
 enum stream_mode {
@@ -1612,12 +1619,12 @@ public:
 
     std::string getDriverKey(void) const
     {
-        return "mucell";
+        return DRIVER_KEY_STR;
     }
 
     std::string getHardwareKey(void) const
     {
-        return "mucell";
+        return HARDWARE_KEY_STR;
     }
 
     SoapySDR::Kwargs getHardwareInfo(void) const
@@ -1712,8 +1719,8 @@ static SoapySDR::KwargsList findDevice(const SoapySDR::Kwargs &args)
     // TODO: check whether a device is actually found
 
     SoapySDR::Kwargs device;
-    device["label"] = "mucell";
-    device["driver"] = "mucell";
+    device["label"] = DEVICE_LABEL_STR;
+    device["driver"] = DEVICE_DRIVER_STR;
     devices.push_back(device);
 
     return devices;
@@ -1731,4 +1738,4 @@ static SoapySDR::Device *makeDevice(const SoapySDR::Kwargs &args)
 /***********************************************************************
  * Registration
  **********************************************************************/
-static SoapySDR::Registry registerDevice("mucell", &findDevice, &makeDevice, SOAPY_SDR_ABI_VERSION);
+static SoapySDR::Registry registerDevice(DEVICE_DRIVER_STR, &findDevice, &makeDevice, SOAPY_SDR_ABI_VERSION);
