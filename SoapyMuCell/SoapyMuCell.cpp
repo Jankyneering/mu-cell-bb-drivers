@@ -732,13 +732,13 @@ public:
             0
         ),
         gpio_rx(gpio,
-            hat_info.product_ver == 0x0100 ? 13 : 23,
+            23,
             "SX RX",
             GPIO_V2_LINE_FLAG_OUTPUT,
             1
         ),
         gpio_tx(gpio,
-            hat_info.product_ver == 0x0100 ? 12 : 22,
+            22,
             "SX TX",
             GPIO_V2_LINE_FLAG_OUTPUT,
             1
