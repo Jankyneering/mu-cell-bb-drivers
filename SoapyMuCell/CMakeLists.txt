@@ -78,25 +78,35 @@ set(MY_SOURCE_FILES SoapyMuCell.cpp)
 set(VERSION_SOURCE_FILE version.cpp)
 set(VERSION_SCRIPT "${CMAKE_SOURCE_DIR}/version.sh")
 
-find_package(Git REQUIRED)
+find_package(Git)
 
-# Use git dir relative to source tree — works whether this is a standalone
-# repo or a subdirectory of a larger repo.
-execute_process(
-    COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_SOURCE_DIR}" rev-parse --git-dir
-    OUTPUT_VARIABLE GIT_DIR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-)
-# Make path absolute if git returned a relative one
-if(NOT IS_ABSOLUTE "${GIT_DIR}")
-    set(GIT_DIR "${CMAKE_SOURCE_DIR}/${GIT_DIR}")
+if(GIT_FOUND)
+    # Use git dir relative to source tree — works whether this is a standalone
+    # repo or a subdirectory of a larger repo.
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_SOURCE_DIR}" rev-parse --git-dir
+        OUTPUT_VARIABLE GIT_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE GIT_DIR_RESULT
+    )
+    # Make path absolute if git returned a relative one
+    if(GIT_DIR_RESULT EQUAL 0 AND NOT IS_ABSOLUTE "${GIT_DIR}")
+        set(GIT_DIR "${CMAKE_SOURCE_DIR}/${GIT_DIR}")
+    endif()
+endif()
+
+# Only depend on the git index if we actually have a valid git repo
+if(GIT_FOUND AND GIT_DIR_RESULT EQUAL 0 AND EXISTS "${GIT_DIR}/index")
+    set(VERSION_GIT_DEP "${GIT_DIR}/index")
+else()
+    set(VERSION_GIT_DEP "")
 endif()
 
 add_custom_command(
     OUTPUT ${VERSION_SOURCE_FILE}
     COMMAND "${VERSION_SCRIPT}" "${GIT_EXECUTABLE}" > "${VERSION_SOURCE_FILE}"
-    DEPENDS "${GIT_DIR}/index" ${VERSION_SCRIPT} ${MY_SOURCE_FILES}
+    DEPENDS ${VERSION_GIT_DEP} ${VERSION_SCRIPT} ${MY_SOURCE_FILES}
 )
 
 ########################################################################
