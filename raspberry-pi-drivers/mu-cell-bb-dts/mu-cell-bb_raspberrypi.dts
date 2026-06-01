@@ -12,7 +12,7 @@
 / {
 	compatible = "brcm,bcm2835";
 
-	// Targets the standard Broadcom hardware I2S engine across RPi generations
+	// 1. Target the physical Broadcom SoC base I2S block
 	fragment@0 {
 		target = <&i2s>;
 		__overlay__ { status = "okay"; };
@@ -46,7 +46,7 @@
 				bitclock-master = <&sac_codec_rx>;
 				frame-master = <&sac_codec_rx>;
 				sac_cpu_rx: cpu {
-					sound-dai = <&i2s>;
+					sound-dai = <&i2s>; // Updated reference
 					dai-tdm-slot-num = <2>;
 					dai-tdm-slot-width = <32>;
 				};
@@ -60,7 +60,7 @@
 				bitclock-master = <&sac_codec_tx>;
 				frame-master = <&sac_codec_tx>;
 				sac_cpu_tx: cpu {
-					sound-dai = <&i2s>;
+					sound-dai = <&i2s>; // Updated reference
 					dai-tdm-slot-num = <2>;
 					dai-tdm-slot-width = <32>;
 				};
