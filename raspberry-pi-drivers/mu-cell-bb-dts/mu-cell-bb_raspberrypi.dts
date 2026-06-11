@@ -1,31 +1,29 @@
 // SPDX-License-Identifier: MIT
+//
+// Device tree overlay to enable I2S on Raspberry Pi.
+//
+// SX1255 is configured from userspace through SPIDEV,
+// so there is no codec to control through the sound subsystem.
+// spdif-dir and spdif-dit are used as dummy codecs.
+//
+// Some useful references:
+// https://www.kernel.org/doc/Documentation/devicetree/bindings/sound/simple-card.txt
+// https://www.kernel.org/doc/Documentation/devicetree/bindings/sound/spdif-receiver.txt
+// https://www.kernel.org/doc/Documentation/devicetree/bindings/sound/spdif-transmitter.txt
+
 /dts-v1/;
 /plugin/;
-
-#ifndef HAT_TX_PIN
-#define HAT_TX_PIN 22
-#endif
-
-#ifndef HAT_RX_PIN
-#define HAT_RX_PIN 23
-#endif
 
 / {
 	compatible = "brcm,bcm2835";
 
-	/*
-	 * Enable Raspberry Pi I²S controller
-	 */
 	fragment@0 {
-		target = <&i2s>;
+		target = <&i2s_clk_consumer>;
 		__overlay__ {
 			status = "okay";
 		};
 	};
 
-	/*
-	 * Dummy codecs used by the ALSA simple-card
-	 */
 	fragment@1 {
 		target-path = "/";
 		__overlay__ {
@@ -42,100 +40,49 @@
 		};
 	};
 
-	/*
-	 * Create a dedicated sound card.
-	 * Do NOT replace the existing &sound node.
-	 */
 	fragment@2 {
-		target-path = "/";
+		target = <&sound>;
 		__overlay__ {
+			compatible = "simple-audio-card";
+			status = "okay";
 
-			sx1255_sound: sx1255-sound {
-				compatible = "simple-audio-card";
-				status = "okay";
+			simple-audio-card,name = "SX1255";
 
-				simple-audio-card,name = "SX1255";
-				simple-audio-card,format = "i2s";
+			simple-audio-card,dai-link@0 {
+				format = "i2s";
+				bitclock-master = <&sac_codec_rx>;
+				frame-master = <&sac_codec_rx>;
 
-				/*
-				 * RX path
-				 */
-				simple-audio-card,dai-link@0 {
-					format = "i2s";
-
-					bitclock-master = <&codec_rx>;
-					frame-master = <&codec_rx>;
-
-					cpu_rx: cpu {
-						sound-dai = <&i2s>;
-						dai-tdm-slot-num = <2>;
-						dai-tdm-slot-width = <32>;
-					};
-
-					codec_rx: codec {
-						sound-dai = <&dummy_codec_rx>;
-					};
+				sac_cpu_rx: cpu {
+					sound-dai = <&i2s_clk_consumer>;
+					dai-tdm-slot-num = <2>;
+					dai-tdm-slot-width = <32>;
 				};
+				sac_codec_rx: codec {
+					sound-dai = <&dummy_codec_rx>;
+				};
+			};
+			simple-audio-card,dai-link@1 {
+				format = "i2s";
+				bitclock-master = <&sac_codec_tx>;
+				frame-master = <&sac_codec_tx>;
 
-				/*
-				 * TX path
-				 */
-				simple-audio-card,dai-link@1 {
-					format = "i2s";
-
-					bitclock-master = <&codec_tx>;
-					frame-master = <&codec_tx>;
-
-					cpu_tx: cpu {
-						sound-dai = <&i2s>;
-						dai-tdm-slot-num = <2>;
-						dai-tdm-slot-width = <32>;
-					};
-
-					codec_tx: codec {
-						sound-dai = <&dummy_codec_tx>;
-					};
+				sac_cpu_tx: cpu {
+					sound-dai = <&i2s_clk_consumer>;
+					dai-tdm-slot-num = <2>;
+					dai-tdm-slot-width = <32>;
+				};
+				sac_codec_tx: codec {
+					sound-dai = <&dummy_codec_tx>;
 				};
 			};
 		};
 	};
 
-	/*
-	 * Enable SPI0
-	 */
-	fragment@3 {
+	fragment@4 {
 		target = <&spi0>;
 		__overlay__ {
 			status = "okay";
-		};
-	};
-
-	/*
-	 * GPIOs used by SX1255 control
-	 */
-	fragment@4 {
-		target = <&gpio>;
-		__overlay__ {
-			sx1255_pins: sx1255_pins {
-				brcm,pins = <HAT_TX_PIN HAT_RX_PIN>;
-				brcm,function = <1>;
-				brcm,pull = <1>;
-			};
-		};
-	};
-
-	/*
-	 * Custom control device
-	 */
-	fragment@5 {
-		target-path = "/";
-		__overlay__ {
-			sx1255_ctrl: sx1255-ctrl {
-				compatible = "sx1255-ctrl";
-				pinctrl-names = "default";
-				pinctrl-0 = <&sx1255_pins>;
-				status = "okay";
-			};
 		};
 	};
 };
