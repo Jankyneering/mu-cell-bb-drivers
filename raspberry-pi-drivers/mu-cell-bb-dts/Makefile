@@ -28,7 +28,7 @@ endif
 HAT_UUID    := $(shell cat /proc/device-tree/hat/uuid 2>/dev/null \
                 || echo "00000000-0000-0000-0000-000000000000")
 HAT_VERSION := $(shell cat /proc/device-tree/hat/product_ver 2>/dev/null \
-                || echo "0x0101")
+                || echo "0x0000")
 
 HAT_TX_PIN := 22
 HAT_RX_PIN := 23
