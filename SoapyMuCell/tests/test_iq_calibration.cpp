@@ -8,6 +8,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <random>
 #include <vector>
 
 static void test_apply_iq_correction_nulls_known_distortion()
@@ -67,6 +68,33 @@ static void test_bin_power_detects_pure_tone()
     assert(power_at_other < 1e-6);
 }
 
+static void test_blind_gain_phase_estimate_recovers_known_mismatch()
+{
+    // A circularly symmetric synthetic signal: independent, equal-power
+    // I/Q components, matching the assumption blind_gain_phase_estimate
+    // relies on.
+    std::mt19937 rng(12345);
+    std::normal_distribution<double> noise(0.0, 1.0);
+
+    for (auto mismatch : { GainPhase{1.08, 0.07}, GainPhase{0.93, -0.04}, GainPhase{1.0, 0.03} }) {
+        const size_t n = 200000;
+        std::vector<float> iq(2 * n);
+        const double a = mismatch.gain * std::sin(mismatch.phase);
+        const double b = mismatch.gain * std::cos(mismatch.phase);
+        for (size_t k = 0; k < n; k++) {
+            double xi = noise(rng), xq = noise(rng);
+            iq[2*k]   = (float)xi;
+            iq[2*k+1] = (float)(a * xi + b * xq);
+        }
+
+        SecondMoments m = compute_second_moments(iq.data(), n, 0.0, 0.0);
+        GainPhase est = blind_gain_phase_estimate(m.var_i, m.var_q, m.cov_iq);
+
+        assert(std::fabs(est.gain - mismatch.gain) < 0.02);
+        assert(std::fabs(est.phase - mismatch.phase) < 0.02);
+    }
+}
+
 static void test_pattern_search_2d_finds_quadratic_minimum()
 {
     // cost(a, b) minimized at (a, b) = (0.3, -0.2)
@@ -87,6 +115,7 @@ int main()
     test_apply_iq_correction_nulls_known_distortion();
     test_apply_iq_correction_identity_is_noop();
     test_bin_power_detects_pure_tone();
+    test_blind_gain_phase_estimate_recovers_known_mismatch();
     test_pattern_search_2d_finds_quadratic_minimum();
     std::printf("All iq_calibration tests passed.\n");
     return 0;

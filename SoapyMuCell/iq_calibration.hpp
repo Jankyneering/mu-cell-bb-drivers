@@ -65,6 +65,48 @@ inline double bin_power(const float *iq_interleaved, size_t n_samples, double cy
     return b.re * b.re + b.im * b.im;
 }
 
+// Blind (training-free) estimate of a chain's own gain and phase mismatch
+// from the second-order statistics of DC-free samples, assuming the
+// underlying signal is circularly symmetric: its I and Q components have
+// equal power and are uncorrelated. This holds for wideband noise-like
+// signals, and even for a chain's own internally generated thermal noise,
+// since the noise passes through the same imbalanced analog path as any
+// other signal would. This is the standard second-order-statistics blind
+// I/Q imbalance estimator (Cavers & Liao 1993; the same circularity
+// property underlies Anttila & Valkama's circularity-based approach).
+// Unlike a loop-back tone measurement, this only characterizes whichever
+// single chain the samples came from, so it is not confounded by another
+// chain's mismatch, and needs no transmitted signal at all.
+struct GainPhase { double gain, phase; };
+
+inline GainPhase blind_gain_phase_estimate(double var_i, double var_q, double cov_iq)
+{
+    double gain = std::sqrt(var_q / var_i);
+    double corr = cov_iq / std::sqrt(var_i * var_q);
+    corr = std::max(-1.0, std::min(1.0, corr));
+    double phase = std::asin(corr);
+    return { gain, phase };
+}
+
+// Second moments of DC-free I/Q samples (variance of I, variance of Q,
+// covariance of I and Q), the sufficient statistics blind_gain_phase_estimate
+// needs. dc_i/dc_q are subtracted from each sample first.
+struct SecondMoments { double var_i, var_q, cov_iq; };
+
+inline SecondMoments compute_second_moments(const float *iq_interleaved, size_t n_samples,
+                                             double dc_i, double dc_q)
+{
+    double var_i = 0.0, var_q = 0.0, cov_iq = 0.0;
+    for (size_t k = 0; k < n_samples; k++) {
+        const double ci = iq_interleaved[2*k]     - dc_i;
+        const double cq = iq_interleaved[2*k + 1] - dc_q;
+        var_i  += ci * ci;
+        var_q  += cq * cq;
+        cov_iq += ci * cq;
+    }
+    return { var_i / (double)n_samples, var_q / (double)n_samples, cov_iq / (double)n_samples };
+}
+
 // Two-parameter pattern search (Hooke-Jeeves style) minimizing cost(a, b).
 // Tries +-step_a on a and +-step_b on b, accepts the first improving move,
 // halves both steps whenever neither axis improves, for max_rounds rounds.

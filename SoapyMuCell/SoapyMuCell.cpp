@@ -796,6 +796,42 @@ private:
         return iq;
     }
 
+    // Read n_blocks consecutive calibration blocks and concatenate them,
+    // for a lower-variance measurement than a single block gives.
+    std::vector<float> cal_read_rx_n(int n_blocks, const IqCal &cal)
+    {
+        std::vector<float> iq;
+        iq.reserve(2 * CAL_BLOCK_SAMPLES * (size_t)n_blocks);
+        for (int b = 0; b < n_blocks; b++) {
+            std::vector<float> block = cal_read_rx(cal);
+            iq.insert(iq.end(), block.begin(), block.end());
+        }
+        return iq;
+    }
+
+    // Clamp a gain/phase correction to a range well beyond the SX1255
+    // datasheet's rated maximum mismatch (1 dB gain, 3 degrees phase, on
+    // both RX and TX), as a safety net against a bad measurement producing
+    // a physically implausible result; falls back to no correction (and
+    // logs a warning) rather than accepting a value the real hardware
+    // could not actually have produced.
+    static bool cal_clamp_gain_phase(IqCal &cal, const char *label)
+    {
+        const float gain_min = 0.80f, gain_max = 1.20f;
+        const float phase_max = 0.15f; // ~8.6 degrees
+        if (cal.gain_ratio < gain_min || cal.gain_ratio > gain_max ||
+            cal.phase_corr < -phase_max || cal.phase_corr > phase_max) {
+            SoapySDR_logf(SOAPY_SDR_WARNING,
+                "%s gain/phase correction (gain=%f phase=%f) is outside plausible "
+                "range for this hardware, ignoring and using no correction",
+                label, cal.gain_ratio, cal.phase_corr);
+            cal.gain_ratio = 1.0f;
+            cal.phase_corr = 0.0f;
+            return false;
+        }
+        return true;
+    }
+
     // Write n_blocks repeats of a CAL_TONE_CYCLES-cycle tone to alsa_tx,
     // pre-distorted with "cal". Assumes alsa_tx has been configured.
     void cal_write_tx_tone(const IqCal &cal, int n_blocks)
@@ -869,6 +905,12 @@ private:
         cal.phase_corr = (float)phase_delta;
     }
 
+    // Number of consecutive blocks concatenated for the blind RX estimate
+    // and the TX DC probe, for a lower-variance measurement than one block
+    // gives; see calibrate_impl().
+    static const int CAL_BLIND_RX_BLOCKS = 8;
+    static const int CAL_TX_DC_PROBE_BLOCKS = 4;
+
     void calibrate_impl(void)
     {
         SoapySDR_logf(SOAPY_SDR_INFO, "Calibrating DC offset and I/Q imbalance");
@@ -876,47 +918,62 @@ private:
         alsa_rx.configure(CAL_BLOCK_SAMPLES);
         alsa_tx.configure(CAL_BLOCK_SAMPLES);
 
-        // Phase 0: RX DC offset, with a normal (non-loop-back) antenna and
-        // TX off, so the only significant DC term is the RX chain's own.
+        // Phase 0: RX DC offset and RX I/Q gain/phase, both blind (from
+        // the RX chain's own ambient/thermal noise, no TX or loop-back
+        // involved), so this characterizes RX alone and cannot be
+        // confounded by TX's own mismatch. A loop-back measurement, by
+        // contrast, sees TX and RX in series: with only a 2-parameter TX
+        // predistortion available, an image-nulling search run against an
+        // uncorrected RX has enough freedom to null the whole round-trip
+        // response by itself, which leaves nothing real for a second,
+        // RX-only search to find; it just fits measurement noise. Doing
+        // RX blind and first avoids that trap entirely.
         setAntenna(SOAPY_SDR_RX, 0, "RX");
         setAntenna(SOAPY_SDR_TX, 0, "NONE");
         cal_rx = IqCal{};
         alsa_rx.start();
         cal_read_rx(IqCal{}); // discard startup transient
-        std::vector<float> idle = cal_read_rx(IqCal{});
-        ComplexBin idle_dc = dft_bin(idle.data(), idle.size() / 2, 0.0);
+        std::vector<float> idle = cal_read_rx_n(CAL_BLIND_RX_BLOCKS, IqCal{});
+        size_t n_idle = idle.size() / 2;
+
+        ComplexBin idle_dc = dft_bin(idle.data(), n_idle, 0.0);
         cal_rx.dc_i = (float)idle_dc.re;
         cal_rx.dc_q = (float)idle_dc.im;
         SoapySDR_logf(SOAPY_SDR_INFO, "RX DC offset: I=%f Q=%f", cal_rx.dc_i, cal_rx.dc_q);
 
-        // Phase 1 and 2 need the TX driver stage and RF loop-back enabled.
+        SecondMoments m = compute_second_moments(idle.data(), n_idle, cal_rx.dc_i, cal_rx.dc_q);
+        GainPhase rx_est = blind_gain_phase_estimate(m.var_i, m.var_q, m.cov_iq);
+        cal_rx.gain_ratio = (float)rx_est.gain;
+        cal_rx.phase_corr = (float)rx_est.phase;
+        cal_clamp_gain_phase(cal_rx, "RX");
+        SoapySDR_logf(SOAPY_SDR_INFO, "RX I/Q correction: gain=%f phase=%f",
+            cal_rx.gain_ratio, cal_rx.phase_corr);
+
+        // Phase 1 needs the TX driver stage and RF loop-back enabled. RX
+        // correction is now the trusted cal_rx from Phase 0 (not identity),
+        // applied to every loop-back capture below: if it correctly undoes
+        // RX's own mismatch, what is left in these captures is TX's own
+        // behavior directly, with no RX DC or gain/phase contribution to
+        // separate out by hand.
         setAntenna(SOAPY_SDR_TX, 0, "TX");
         setAntenna(SOAPY_SDR_RX, 0, "LB");
 
-        // Phase 1: TX DC offset (LO leakage) and TX I/Q gain/phase.
-        // RX correction is left at identity here so the measurement
-        // reflects TX's own behavior as closely as possible; the RX DC
-        // baseline from Phase 0 is subtracted back out of the 0 Hz bin
-        // since both RX's and TX's DC terms land on it together.
         cal_tx = IqCal{};
-        LoopbackMeasurement tx_probe = cal_measure_loopback(cal_tx, IqCal{});
-        cal_tx.dc_i = (float)tx_probe.dc.re - cal_rx.dc_i;
-        cal_tx.dc_q = (float)tx_probe.dc.im - cal_rx.dc_q;
+        cal_write_tx_tone(cal_tx, 3 + CAL_TX_DC_PROBE_BLOCKS);
+        alsa_rx.start();
+        cal_read_rx(cal_rx); // discard the RX startup transient
+        std::vector<float> probe = cal_read_rx_n(CAL_TX_DC_PROBE_BLOCKS, cal_rx);
+        ComplexBin tx_dc = dft_bin(probe.data(), probe.size() / 2, 0.0);
+        cal_tx.dc_i = (float)tx_dc.re;
+        cal_tx.dc_q = (float)tx_dc.im;
         SoapySDR_logf(SOAPY_SDR_INFO, "TX DC offset: I=%f Q=%f", cal_tx.dc_i, cal_tx.dc_q);
 
         cal_search_gain_phase(cal_tx, [&](const IqCal &trial) {
-            return cal_measure_loopback(trial, IqCal{}).image;
+            return cal_measure_loopback(trial, cal_rx).image;
         });
+        cal_clamp_gain_phase(cal_tx, "TX");
         SoapySDR_logf(SOAPY_SDR_INFO, "TX I/Q correction: gain=%f phase=%f",
             cal_tx.gain_ratio, cal_tx.phase_corr);
-
-        // Phase 2: RX I/Q gain/phase, with TX now pre-corrected from
-        // Phase 1, so most of what remains in the image is RX's own.
-        cal_search_gain_phase(cal_rx, [&](const IqCal &trial) {
-            return cal_measure_loopback(cal_tx, trial).image;
-        });
-        SoapySDR_logf(SOAPY_SDR_INFO, "RX I/Q correction: gain=%f phase=%f",
-            cal_rx.gain_ratio, cal_rx.phase_corr);
     }
 
     // Runs calibrate_impl() and always leaves the device in a safe idle
