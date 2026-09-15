@@ -891,7 +891,7 @@ private:
         // writes the identical waveform back to back with no phase break.
         double cycles = (double)CAL_TONE_CYCLES * n_blocks;
 
-        SoapySDR_logf(SOAPY_SDR_INFO, "Loop-back capture peak |I|/|Q|: %f (1.0 = full scale)",
+        SoapySDR_logf(SOAPY_SDR_DEBUG, "Loop-back capture peak |I|/|Q|: %f (1.0 = full scale)",
             peak_abs_sample(iq.data(), n));
 
         LoopbackMeasurement m;
@@ -962,7 +962,7 @@ private:
         cal_read_rx_n(CAL_WARMUP_BLOCKS, IqCal{}); // discard startup transient
         std::vector<float> idle = cal_read_rx_n(CAL_BLIND_RX_BLOCKS, IqCal{});
         size_t n_idle = idle.size() / 2;
-        SoapySDR_logf(SOAPY_SDR_INFO, "Ambient RX capture peak |I|/|Q|: %f (1.0 = full scale)",
+        SoapySDR_logf(SOAPY_SDR_DEBUG, "Ambient RX capture peak |I|/|Q|: %f (1.0 = full scale)",
             peak_abs_sample(idle.data(), n_idle));
 
         ComplexBin idle_dc = dft_bin(idle.data(), n_idle, 0.0);
