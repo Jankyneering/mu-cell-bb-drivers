@@ -1,4 +1,11 @@
 // SPDX-License-Identifier: MIT
+/* This driver was originally designed by Tatu Peltola for the SxCeiver
+The following additions have been done for the µCell: 
+
+- Added EEPROM/HAT authenticity checks (non-blocking, only for support purposes)
+- Added calibration routines
+- Added I/Q imbalance and DC offset compensation based on those routines
+*/
 
 #include <SoapySDR/Device.hpp>
 #include <SoapySDR/Registry.hpp>
@@ -27,6 +34,7 @@ extern const char *SoapyMuCell_tag;
 extern const char *SoapyMuCell_commit;
 
 #include "eeprom_auth.hpp"
+#include "iq_calibration.hpp"
 
 #define DRIVER_KEY_STR "mucell"
 #define HARDWARE_KEY_STR "mucell"
@@ -147,22 +155,33 @@ static struct hat_info read_hat_info(void)
     return info;
 }
 
-// Convert raw received samples to CF32.
+// Convert raw received samples to CF32, applying DC offset and I/Q
+// gain/phase correction (see iq_calibration.hpp) to undo RX chain
+// impairments.
 // TODO: Support other formats and add format as a parameter.
-static inline void convert_rx_buffer(const void *src, size_t src_offset, void *dest, size_t dest_offset, size_t length)
+static inline void convert_rx_buffer(const void *src, size_t src_offset, void *dest, size_t dest_offset, size_t length, const IqCal &cal)
 {
     const int32_t *src_ = (const int32_t*)src + src_offset*2;
     float *dest_ = (float*)dest + dest_offset*2;
     const float scaling = 1.0f / 0x80000000L;
-    for (size_t i = 0; i < length*2; i++)
+    for (size_t i = 0; i < length*2; i+=2)
     {
-        dest_[i] = scaling * (float)src_[i];
+        float fi = scaling * (float)src_[i];
+        float fq = scaling * (float)src_[i+1];
+        apply_iq_correction(fi, fq, cal);
+        dest_[i  ] = fi;
+        dest_[i+1] = fq;
     }
 }
 
-// Convert CF32 to raw transmit samples.
+// Convert CF32 to raw transmit samples, pre-distorting with the inverse of
+// the TX chain's own DC offset and I/Q gain/phase mismatch (see
+// iq_calibration.hpp) so the transmitted signal comes out undistorted.
+// Correction is applied before the RX/TX switching threshold below, so the
+// switch decision is based on the same magnitude that will actually be
+// transmitted.
 // TODO: Support other formats and add format as a parameter.
-static inline void convert_tx_buffer(const void *src, size_t src_offset, void *dest, size_t dest_offset, size_t length, float tx_threshold2)
+static inline void convert_tx_buffer(const void *src, size_t src_offset, void *dest, size_t dest_offset, size_t length, float tx_threshold2, const IqCal &cal)
 {
     const float *src_ = (const float*)src + src_offset*2;
     int32_t *dest_ = (int32_t*)dest + dest_offset*2;
@@ -170,6 +189,7 @@ static inline void convert_tx_buffer(const void *src, size_t src_offset, void *d
     for (size_t i = 0; i < length*2; i+=2)
     {
         float fi = src_[i], fq = src_[i+1];
+        apply_iq_correction(fi, fq, cal);
         int32_t vi = scaling * std::max(std::min(fi, 1.0f), -1.0f);
         int32_t vq = scaling * std::max(std::min(fq, 1.0f), -1.0f);
         // Second lowest bit of each "I" sample controls RX/TX switching.
@@ -465,6 +485,17 @@ public:
         return dir == SND_PCM_STREAM_PLAYBACK;
     }
 
+    // Explicitly start the stream if it is prepared but not yet running.
+    // Same logic as activateStream() uses for client streams; calibrate()
+    // uses this to drive alsa_rx/alsa_tx directly before any client has
+    // called setupStream.
+    int start()
+    {
+        if (snd_pcm_state(pcm) == SND_PCM_STATE_PREPARED)
+            return snd_pcm_start(pcm);
+        return 0;
+    }
+
     int reset()
     {
         int ret = 0;
@@ -605,6 +636,12 @@ private:
     // Buffer for TX samples after type conversion.
     std::vector<uint64_t> buffer_tx;
 
+    // DC offset and I/Q gain/phase correction, measured at startup by
+    // calibrate() and applied in convert_rx_buffer/convert_tx_buffer.
+    // Default-constructed as the identity (no correction).
+    IqCal cal_rx;
+    IqCal cal_tx;
+
     struct hat_info hat_info;
 
     // Convert a SoapySDR nanosecond timestamp to a sample counter.
@@ -714,6 +751,202 @@ private:
     }
 
 /***********************************************************************
+ * Calibration: DC offset and I/Q gain/phase correction
+ *
+ * Measured once at startup (see calibrate()) into cal_rx/cal_tx, which
+ * convert_rx_buffer/convert_tx_buffer apply to every sample. The SX1255
+ * has no per-channel gain or phase trim registers (datasheet section 5),
+ * so correction is done here in software; what the chip does provide is
+ * an RF loop-back path (CK_SEL.rf_loopback_en, already used by the "LB"
+ * antenna in setAntenna()) connecting the TX driver stage into the RX
+ * mixer, which the datasheet (section 3.8.2) documents as the intended
+ * way to calibrate both RX and TX I/Q mismatch and TX DC offset/LO
+ * leakage. This uses that path to measure a known tone and its image
+ * instead of guessing from ambient noise.
+ **********************************************************************/
+
+    // Samples per calibration measurement block.
+    static const size_t CAL_BLOCK_SAMPLES = 2048;
+    // Tone frequency during loop-back measurement, as whole cycles per
+    // block, so the DFT bins used are exact (no spectral leakage)
+    // regardless of the arbitrary timing offset between starting the TX
+    // and RX ALSA streams: any capture window still contains exactly
+    // this many tone cycles.
+    static const int CAL_TONE_CYCLES = 16;
+
+    struct LoopbackMeasurement {
+        ComplexBin dc, tone, image;
+    };
+
+    // Read one calibration block from alsa_rx, applying "cal".
+    // Assumes alsa_rx has been configured and started.
+    std::vector<float> cal_read_rx(const IqCal &cal)
+    {
+        std::vector<uint64_t> raw(CAL_BLOCK_SAMPLES);
+        snd_pcm_sframes_t got = snd_pcm_readi(alsa_rx.pcm, raw.data(), CAL_BLOCK_SAMPLES);
+        if (got < 0) {
+            snd_pcm_prepare(alsa_rx.pcm);
+            got = snd_pcm_readi(alsa_rx.pcm, raw.data(), CAL_BLOCK_SAMPLES);
+        }
+        if (got < 0)
+            throw std::runtime_error("Calibration: RX read failed");
+
+        std::vector<float> iq(2 * (size_t)got);
+        convert_rx_buffer(raw.data(), 0, iq.data(), 0, (size_t)got, cal);
+        return iq;
+    }
+
+    // Write n_blocks repeats of a CAL_TONE_CYCLES-cycle tone to alsa_tx,
+    // pre-distorted with "cal". Assumes alsa_tx has been configured.
+    void cal_write_tx_tone(const IqCal &cal, int n_blocks)
+    {
+        std::vector<float> tone(2 * CAL_BLOCK_SAMPLES);
+        const float amplitude = 0.5f;
+        for (size_t n = 0; n < CAL_BLOCK_SAMPLES; n++) {
+            double phase = 2.0 * M_PI * CAL_TONE_CYCLES * (double)n / (double)CAL_BLOCK_SAMPLES;
+            tone[2*n]   = amplitude * (float)std::cos(phase);
+            tone[2*n+1] = amplitude * (float)std::sin(phase);
+        }
+        std::vector<uint64_t> raw(CAL_BLOCK_SAMPLES);
+        convert_tx_buffer(tone.data(), 0, raw.data(), 0, CAL_BLOCK_SAMPLES, tx_threshold2, cal);
+
+        for (int b = 0; b < n_blocks; b++) {
+            snd_pcm_sframes_t written = snd_pcm_writei(alsa_tx.pcm, raw.data(), CAL_BLOCK_SAMPLES);
+            if (written < 0) {
+                snd_pcm_prepare(alsa_tx.pcm);
+                written = snd_pcm_writei(alsa_tx.pcm, raw.data(), CAL_BLOCK_SAMPLES);
+            }
+            if (written < 0)
+                throw std::runtime_error("Calibration: TX write failed");
+            // Only need to start the stream once, after the first write
+            // gives it something to play.
+            if (b == 0)
+                alsa_tx.start();
+        }
+    }
+
+    // Transmit a tone pre-distorted with tx_cal, receive it through the RF
+    // loop-back path with correction rx_cal applied, and measure the
+    // resulting DC, wanted tone and image bins. Assumes the RF loop-back
+    // antenna and TX driver are already enabled (see calibrate()).
+    LoopbackMeasurement cal_measure_loopback(const IqCal &tx_cal, const IqCal &rx_cal)
+    {
+        // A few extra blocks give the analog chain and ALSA/DMA buffering
+        // time to settle into steady state before the measurement block.
+        cal_write_tx_tone(tx_cal, 3);
+        alsa_rx.start();
+        cal_read_rx(IqCal{}); // discard the RX startup transient
+        std::vector<float> iq = cal_read_rx(rx_cal);
+        size_t n = iq.size() / 2;
+
+        LoopbackMeasurement m;
+        m.dc    = dft_bin(iq.data(), n, 0.0);
+        m.tone  = dft_bin(iq.data(), n, CAL_TONE_CYCLES);
+        m.image = dft_bin(iq.data(), n, -CAL_TONE_CYCLES);
+        return m;
+    }
+
+    static double bin_power(const ComplexBin &b)
+    {
+        return b.re * b.re + b.im * b.im;
+    }
+
+    // Search a small gain/phase correction around "cal"'s current values
+    // that minimizes the image power measure() reports, and write the
+    // result back into "cal".
+    template <typename MeasureFn>
+    void cal_search_gain_phase(IqCal &cal, MeasureFn measure)
+    {
+        double gain_delta = 0.0, phase_delta = 0.0;
+        pattern_search_2d(gain_delta, phase_delta, 0.05, 0.05, 8,
+            [&](double gd, double pd) {
+                IqCal trial = cal;
+                trial.gain_ratio = 1.0f + (float)gd;
+                trial.phase_corr = (float)pd;
+                return bin_power(measure(trial));
+            });
+        cal.gain_ratio = 1.0f + (float)gain_delta;
+        cal.phase_corr = (float)phase_delta;
+    }
+
+    void calibrate_impl(void)
+    {
+        SoapySDR_logf(SOAPY_SDR_INFO, "Calibrating DC offset and I/Q imbalance");
+
+        alsa_rx.configure(CAL_BLOCK_SAMPLES);
+        alsa_tx.configure(CAL_BLOCK_SAMPLES);
+
+        // Phase 0: RX DC offset, with a normal (non-loop-back) antenna and
+        // TX off, so the only significant DC term is the RX chain's own.
+        setAntenna(SOAPY_SDR_RX, 0, "RX");
+        setAntenna(SOAPY_SDR_TX, 0, "NONE");
+        cal_rx = IqCal{};
+        alsa_rx.start();
+        cal_read_rx(IqCal{}); // discard startup transient
+        std::vector<float> idle = cal_read_rx(IqCal{});
+        ComplexBin idle_dc = dft_bin(idle.data(), idle.size() / 2, 0.0);
+        cal_rx.dc_i = (float)idle_dc.re;
+        cal_rx.dc_q = (float)idle_dc.im;
+        SoapySDR_logf(SOAPY_SDR_INFO, "RX DC offset: I=%f Q=%f", cal_rx.dc_i, cal_rx.dc_q);
+
+        // Phase 1 and 2 need the TX driver stage and RF loop-back enabled.
+        setAntenna(SOAPY_SDR_TX, 0, "TX");
+        setAntenna(SOAPY_SDR_RX, 0, "LB");
+
+        // Phase 1: TX DC offset (LO leakage) and TX I/Q gain/phase.
+        // RX correction is left at identity here so the measurement
+        // reflects TX's own behavior as closely as possible; the RX DC
+        // baseline from Phase 0 is subtracted back out of the 0 Hz bin
+        // since both RX's and TX's DC terms land on it together.
+        cal_tx = IqCal{};
+        LoopbackMeasurement tx_probe = cal_measure_loopback(cal_tx, IqCal{});
+        cal_tx.dc_i = (float)tx_probe.dc.re - cal_rx.dc_i;
+        cal_tx.dc_q = (float)tx_probe.dc.im - cal_rx.dc_q;
+        SoapySDR_logf(SOAPY_SDR_INFO, "TX DC offset: I=%f Q=%f", cal_tx.dc_i, cal_tx.dc_q);
+
+        cal_search_gain_phase(cal_tx, [&](const IqCal &trial) {
+            return cal_measure_loopback(trial, IqCal{}).image;
+        });
+        SoapySDR_logf(SOAPY_SDR_INFO, "TX I/Q correction: gain=%f phase=%f",
+            cal_tx.gain_ratio, cal_tx.phase_corr);
+
+        // Phase 2: RX I/Q gain/phase, with TX now pre-corrected from
+        // Phase 1, so most of what remains in the image is RX's own.
+        cal_search_gain_phase(cal_rx, [&](const IqCal &trial) {
+            return cal_measure_loopback(cal_tx, trial).image;
+        });
+        SoapySDR_logf(SOAPY_SDR_INFO, "RX I/Q correction: gain=%f phase=%f",
+            cal_rx.gain_ratio, cal_rx.phase_corr);
+    }
+
+    // Runs calibrate_impl() and always leaves the device in a safe idle
+    // state afterward (normal antenna, PA off, streams stopped), even if
+    // calibration fails, e.g. because no hardware is actually connected.
+    // A failed calibration falls back to no correction rather than
+    // blocking device construction.
+    void calibrate(void)
+    {
+        std::scoped_lock lock(alsa_rx.mutex, alsa_tx.mutex, reg_mutex);
+
+        if (alsa_rx.activated || alsa_tx.activated)
+            throw std::runtime_error("Cannot calibrate while a stream is active");
+
+        try {
+            calibrate_impl();
+        } catch (const std::exception &e) {
+            SoapySDR_logf(SOAPY_SDR_WARNING,
+                "Calibration failed (%s), continuing without I/Q correction", e.what());
+            cal_rx = IqCal{};
+            cal_tx = IqCal{};
+        }
+
+        setAntenna(SOAPY_SDR_RX, 0, "RX");
+        setAntenna(SOAPY_SDR_TX, 0, "NONE");
+        alsa_rx.reset();
+        alsa_tx.reset();
+    }
+
+/***********************************************************************
  * Initialization and destruction
  **********************************************************************/
 
@@ -757,8 +990,6 @@ public:
 
         hat_info(hat_info)
     {
-        (void)args;
-
         SoapySDR_logf(SOAPY_SDR_INFO, "Initializing SoapyMuCell");
 
         reset_chip();
@@ -768,6 +999,15 @@ public:
         // I am not sure if this makes any difference but just in case.
         alsa_rx.open();
         alsa_tx.open();
+
+        // Startup calibration can be skipped with device args "calibrate=0",
+        // e.g. for a quicker start on hardware known to be already good, or
+        // when running without an SX1255 actually attached.
+        if (args.count("calibrate") > 0 && args.at("calibrate") == "0") {
+            SoapySDR_logf(SOAPY_SDR_INFO, "Skipping startup calibration (calibrate=0)");
+        } else {
+            calibrate();
+        }
     }
 
     ~SoapyMuCell(void)
@@ -1007,7 +1247,7 @@ public:
 
                 assert((size_t)samples_read <= buffer_rx.size());
                 assert((size_t)samples_read <= numElems);
-                convert_rx_buffer(buffer_rx.data(), 0, buffs[0], 0, samples_read);
+                convert_rx_buffer(buffer_rx.data(), 0, buffs[0], 0, samples_read, cal_rx);
 
                 return (int)samples_read;
             } else {
@@ -1140,7 +1380,7 @@ public:
         if (length > buffer_tx.size())
             buffer_tx.resize(length);
 
-        convert_tx_buffer(buffs[0], 0, buffer_tx.data(), 0, length, tx_threshold2);
+        convert_tx_buffer(buffs[0], 0, buffer_tx.data(), 0, length, tx_threshold2, cal_tx);
 
         if (length > 0) {
             snd_pcm_sframes_t samples_written = snd_pcm_writei(pcm, buffer_tx.data(), length);
@@ -1542,10 +1782,28 @@ public:
                 gpio_tx.set_value(1);
                 gpio_rx.set_value(1);
             }
+        } else if (key == "CALIBRATE") {
+            // Re-run DC offset / I/Q imbalance calibration on demand.
+            calibrate();
         }
     }
 
-    // TODO: readSetting, getSettingInfo
+    std::string readSetting(const std::string & key) const
+    {
+        std::scoped_lock lock(reg_mutex);
+
+        if (key == "CAL_RX_DC_I")  return std::to_string(cal_rx.dc_i);
+        if (key == "CAL_RX_DC_Q")  return std::to_string(cal_rx.dc_q);
+        if (key == "CAL_RX_GAIN")  return std::to_string(cal_rx.gain_ratio);
+        if (key == "CAL_RX_PHASE") return std::to_string(cal_rx.phase_corr);
+        if (key == "CAL_TX_DC_I")  return std::to_string(cal_tx.dc_i);
+        if (key == "CAL_TX_DC_Q")  return std::to_string(cal_tx.dc_q);
+        if (key == "CAL_TX_GAIN")  return std::to_string(cal_tx.gain_ratio);
+        if (key == "CAL_TX_PHASE") return std::to_string(cal_tx.phase_corr);
+        return "";
+    }
+
+    // TODO: getSettingInfo
 
 /***********************************************************************
  * Low level interfaces

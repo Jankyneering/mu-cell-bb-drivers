@@ -110,6 +110,12 @@ add_custom_command(
 )
 
 ########################################################################
+# Unit tests for pure-math helpers (no SoapySDR/ALSA/hardware needed)
+########################################################################
+add_executable(test_iq_calibration tests/test_iq_calibration.cpp)
+add_test(NAME iq_calibration COMMAND test_iq_calibration)
+
+########################################################################
 # build the module
 ########################################################################
 find_package(SoapySDR CONFIG)
