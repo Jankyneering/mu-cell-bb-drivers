@@ -1,11 +1,4 @@
 // SPDX-License-Identifier: MIT
-/* This driver was originally designed by Tatu Peltola for the SxCeiver
-The following additions have been done for the µCell: 
-
-- Added EEPROM/HAT authenticity checks (non-blocking, only for support purposes)
-- Added calibration routines
-- Added I/Q imbalance and DC offset compensation based on those routines
-*/
 
 #include <SoapySDR/Device.hpp>
 #include <SoapySDR/Registry.hpp>
@@ -875,6 +868,9 @@ private:
         std::vector<float> iq = cal_read_rx(rx_cal);
         size_t n = iq.size() / 2;
 
+        SoapySDR_logf(SOAPY_SDR_INFO, "Loop-back capture peak |I|/|Q|: %f (1.0 = full scale)",
+            peak_abs_sample(iq.data(), n));
+
         LoopbackMeasurement m;
         m.dc    = dft_bin(iq.data(), n, 0.0);
         m.tone  = dft_bin(iq.data(), n, CAL_TONE_CYCLES);
@@ -935,6 +931,8 @@ private:
         cal_read_rx(IqCal{}); // discard startup transient
         std::vector<float> idle = cal_read_rx_n(CAL_BLIND_RX_BLOCKS, IqCal{});
         size_t n_idle = idle.size() / 2;
+        SoapySDR_logf(SOAPY_SDR_INFO, "Ambient RX capture peak |I|/|Q|: %f (1.0 = full scale)",
+            peak_abs_sample(idle.data(), n_idle));
 
         ComplexBin idle_dc = dft_bin(idle.data(), n_idle, 0.0);
         cal_rx.dc_i = (float)idle_dc.re;
@@ -963,6 +961,8 @@ private:
         alsa_rx.start();
         cal_read_rx(cal_rx); // discard the RX startup transient
         std::vector<float> probe = cal_read_rx_n(CAL_TX_DC_PROBE_BLOCKS, cal_rx);
+        SoapySDR_logf(SOAPY_SDR_INFO, "TX DC probe capture peak |I|/|Q|: %f (1.0 = full scale)",
+            peak_abs_sample(probe.data(), probe.size() / 2));
         ComplexBin tx_dc = dft_bin(probe.data(), probe.size() / 2, 0.0);
         cal_tx.dc_i = (float)tx_dc.re;
         cal_tx.dc_q = (float)tx_dc.im;

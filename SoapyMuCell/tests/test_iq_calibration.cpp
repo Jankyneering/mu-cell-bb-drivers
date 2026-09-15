@@ -68,6 +68,17 @@ static void test_bin_power_detects_pure_tone()
     assert(power_at_other < 1e-6);
 }
 
+static void test_peak_abs_sample_finds_largest_magnitude()
+{
+    // Peak magnitude is in Q of the second sample here (-0.9), not I of
+    // the third (0.6), to check both channels and both signs are checked.
+    std::vector<float> iq = { 0.1f, -0.2f, 0.3f, -0.9f, 0.6f, 0.05f };
+    assert(std::fabs(peak_abs_sample(iq.data(), 3) - 0.9f) < 1e-6f);
+
+    std::vector<float> silence(20, 0.0f);
+    assert(peak_abs_sample(silence.data(), 10) == 0.0f);
+}
+
 static void test_blind_gain_phase_estimate_recovers_known_mismatch()
 {
     // A circularly symmetric synthetic signal: independent, equal-power
@@ -115,6 +126,7 @@ int main()
     test_apply_iq_correction_nulls_known_distortion();
     test_apply_iq_correction_identity_is_noop();
     test_bin_power_detects_pure_tone();
+    test_peak_abs_sample_finds_largest_magnitude();
     test_blind_gain_phase_estimate_recovers_known_mismatch();
     test_pattern_search_2d_finds_quadratic_minimum();
     std::printf("All iq_calibration tests passed.\n");

@@ -4,6 +4,7 @@
 // or hardware access here, so it can be unit tested without a device.
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 
@@ -63,6 +64,20 @@ inline double bin_power(const float *iq_interleaved, size_t n_samples, double cy
 {
     ComplexBin b = dft_bin(iq_interleaved, n_samples, cycles_per_block);
     return b.re * b.re + b.im * b.im;
+}
+
+// Peak absolute value of either channel across an interleaved I/Q buffer.
+// Used as a clipping diagnostic during calibration: samples should stay
+// well under 1.0 (full scale, see convert_rx_buffer/convert_tx_buffer)
+// for the DFT-based measurements above to be trustworthy.
+inline float peak_abs_sample(const float *iq_interleaved, size_t n_samples)
+{
+    float peak = 0.0f;
+    for (size_t k = 0; k < n_samples; k++) {
+        peak = std::max(peak, std::fabs(iq_interleaved[2*k]));
+        peak = std::max(peak, std::fabs(iq_interleaved[2*k + 1]));
+    }
+    return peak;
 }
 
 // Blind (training-free) estimate of a chain's own gain and phase mismatch
