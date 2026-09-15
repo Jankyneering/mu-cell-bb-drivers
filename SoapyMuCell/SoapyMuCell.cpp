@@ -907,7 +907,15 @@ private:
     static const int CAL_BLIND_RX_BLOCKS = 8;
     static const int CAL_TX_DC_PROBE_BLOCKS = 4;
 
-    void calibrate_impl(void)
+    // Reduction applied to RX gain during the loop-back phase (see
+    // calibrate_impl()): the loop-back path taps the TX driver output
+    // directly into the RX mixer, bypassing the LNA, so it runs much
+    // hotter than the weak ambient signal Phase 0's gain setting is meant
+    // for. Restored by calibrate() once calibrate_impl() returns.
+    static constexpr double CAL_LOOPBACK_LNA_REDUCTION_DB = 12.0;
+    static constexpr double CAL_LOOPBACK_PGA_REDUCTION_DB = 6.0;
+
+    void calibrate_impl(double orig_rx_lna_gain, double orig_rx_pga_gain)
     {
         SoapySDR_logf(SOAPY_SDR_INFO, "Calibrating DC offset and I/Q imbalance");
 
@@ -956,6 +964,13 @@ private:
         setAntenna(SOAPY_SDR_TX, 0, "TX");
         setAntenna(SOAPY_SDR_RX, 0, "LB");
 
+        // The loop-back signal runs much hotter than Phase 0's ambient
+        // signal (see the peak |I|/|Q| logging below); back RX gain off
+        // for headroom. calibrate() restores orig_rx_lna_gain/
+        // orig_rx_pga_gain once this function returns, even on failure.
+        setGain(SOAPY_SDR_RX, 0, "LNA", orig_rx_lna_gain - CAL_LOOPBACK_LNA_REDUCTION_DB);
+        setGain(SOAPY_SDR_RX, 0, "PGA", orig_rx_pga_gain - CAL_LOOPBACK_PGA_REDUCTION_DB);
+
         cal_tx = IqCal{};
         cal_write_tx_tone(cal_tx, 3 + CAL_TX_DC_PROBE_BLOCKS);
         alsa_rx.start();
@@ -988,8 +1003,16 @@ private:
         if (alsa_rx.activated || alsa_tx.activated)
             throw std::runtime_error("Cannot calibrate while a stream is active");
 
+        // Captured before calibrate_impl() lowers RX gain for the
+        // loop-back phase, and restored below unconditionally (even if
+        // calibration throws), so a client's own gain setting on a
+        // re-calibration (via writeSetting("CALIBRATE", ...)) is never
+        // left altered by a failed or successful run.
+        double orig_rx_lna_gain = getGain(SOAPY_SDR_RX, 0, "LNA");
+        double orig_rx_pga_gain = getGain(SOAPY_SDR_RX, 0, "PGA");
+
         try {
-            calibrate_impl();
+            calibrate_impl(orig_rx_lna_gain, orig_rx_pga_gain);
         } catch (const std::exception &e) {
             SoapySDR_logf(SOAPY_SDR_WARNING,
                 "Calibration failed (%s), continuing without I/Q correction", e.what());
@@ -999,6 +1022,8 @@ private:
 
         setAntenna(SOAPY_SDR_RX, 0, "RX");
         setAntenna(SOAPY_SDR_TX, 0, "NONE");
+        setGain(SOAPY_SDR_RX, 0, "LNA", orig_rx_lna_gain);
+        setGain(SOAPY_SDR_RX, 0, "PGA", orig_rx_pga_gain);
         alsa_rx.reset();
         alsa_tx.reset();
     }
