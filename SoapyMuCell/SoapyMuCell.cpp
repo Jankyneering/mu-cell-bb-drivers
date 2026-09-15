@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: MIT
 
+/* This driver was originally designed by Tatu Peltola for the SxCeiver
+The following additions have been done for the µCell:
+
+- Added EEPROM/HAT authenticity checks (non-blocking, only for support purposes)
+- Added calibration routines
+- Added I/Q imbalance and DC offset compensation based on those routines
+*/
+
 #include <SoapySDR/Device.hpp>
 #include <SoapySDR/Registry.hpp>
 #include <SoapySDR/Logger.hpp>
@@ -766,6 +774,14 @@ private:
     // and RX ALSA streams: any capture window still contains exactly
     // this many tone cycles.
     static const int CAL_TONE_CYCLES = 16;
+    // Blocks discarded after alsa_rx.start() or an antenna/gain change
+    // before treating samples as settled. The SX1255 datasheet lists RX
+    // wake-up time as unspecified ("tbd"), so this errs on the generous
+    // side rather than risking a startup transient biasing a measurement.
+    static const int CAL_WARMUP_BLOCKS = 4;
+    // Blocks captured per loop-back search trial (see cal_search_gain_phase),
+    // averaged down to a lower-variance single measurement.
+    static const int CAL_SEARCH_BLOCKS = 3;
 
     struct LoopbackMeasurement {
         ComplexBin dc, tone, image;
@@ -854,27 +870,34 @@ private:
         }
     }
 
-    // Transmit a tone pre-distorted with tx_cal, receive it through the RF
-    // loop-back path with correction rx_cal applied, and measure the
-    // resulting DC, wanted tone and image bins. Assumes the RF loop-back
-    // antenna and TX driver are already enabled (see calibrate()).
-    LoopbackMeasurement cal_measure_loopback(const IqCal &tx_cal, const IqCal &rx_cal)
+    // Transmit a tone pre-distorted with tx_cal, receive n_blocks of it
+    // through the RF loop-back path with correction rx_cal applied, and
+    // measure the resulting DC, wanted tone and image bins over the whole
+    // concatenated capture (lower variance than a single block gives).
+    // Assumes the RF loop-back antenna and TX driver are already enabled
+    // (see calibrate()).
+    LoopbackMeasurement cal_measure_loopback(const IqCal &tx_cal, const IqCal &rx_cal, int n_blocks)
     {
         // A few extra blocks give the analog chain and ALSA/DMA buffering
-        // time to settle into steady state before the measurement block.
-        cal_write_tx_tone(tx_cal, 3);
+        // time to settle into steady state before the measurement blocks,
+        // on top of the warm-up blocks discarded below.
+        cal_write_tx_tone(tx_cal, 3 + CAL_WARMUP_BLOCKS + n_blocks);
         alsa_rx.start();
-        cal_read_rx(IqCal{}); // discard the RX startup transient
-        std::vector<float> iq = cal_read_rx(rx_cal);
+        cal_read_rx_n(CAL_WARMUP_BLOCKS, IqCal{}); // discard the RX startup transient
+        std::vector<float> iq = cal_read_rx_n(n_blocks, rx_cal);
         size_t n = iq.size() / 2;
+        // The concatenated capture still contains exactly n_blocks times
+        // as many tone cycles as a single block, since cal_write_tx_tone
+        // writes the identical waveform back to back with no phase break.
+        double cycles = (double)CAL_TONE_CYCLES * n_blocks;
 
         SoapySDR_logf(SOAPY_SDR_INFO, "Loop-back capture peak |I|/|Q|: %f (1.0 = full scale)",
             peak_abs_sample(iq.data(), n));
 
         LoopbackMeasurement m;
         m.dc    = dft_bin(iq.data(), n, 0.0);
-        m.tone  = dft_bin(iq.data(), n, CAL_TONE_CYCLES);
-        m.image = dft_bin(iq.data(), n, -CAL_TONE_CYCLES);
+        m.tone  = dft_bin(iq.data(), n, cycles);
+        m.image = dft_bin(iq.data(), n, -cycles);
         return m;
     }
 
@@ -936,7 +959,7 @@ private:
         setAntenna(SOAPY_SDR_TX, 0, "NONE");
         cal_rx = IqCal{};
         alsa_rx.start();
-        cal_read_rx(IqCal{}); // discard startup transient
+        cal_read_rx_n(CAL_WARMUP_BLOCKS, IqCal{}); // discard startup transient
         std::vector<float> idle = cal_read_rx_n(CAL_BLIND_RX_BLOCKS, IqCal{});
         size_t n_idle = idle.size() / 2;
         SoapySDR_logf(SOAPY_SDR_INFO, "Ambient RX capture peak |I|/|Q|: %f (1.0 = full scale)",
@@ -972,19 +995,13 @@ private:
         setGain(SOAPY_SDR_RX, 0, "PGA", orig_rx_pga_gain - CAL_LOOPBACK_PGA_REDUCTION_DB);
 
         cal_tx = IqCal{};
-        cal_write_tx_tone(cal_tx, 3 + CAL_TX_DC_PROBE_BLOCKS);
-        alsa_rx.start();
-        cal_read_rx(cal_rx); // discard the RX startup transient
-        std::vector<float> probe = cal_read_rx_n(CAL_TX_DC_PROBE_BLOCKS, cal_rx);
-        SoapySDR_logf(SOAPY_SDR_INFO, "TX DC probe capture peak |I|/|Q|: %f (1.0 = full scale)",
-            peak_abs_sample(probe.data(), probe.size() / 2));
-        ComplexBin tx_dc = dft_bin(probe.data(), probe.size() / 2, 0.0);
-        cal_tx.dc_i = (float)tx_dc.re;
-        cal_tx.dc_q = (float)tx_dc.im;
+        LoopbackMeasurement tx_probe = cal_measure_loopback(cal_tx, cal_rx, CAL_TX_DC_PROBE_BLOCKS);
+        cal_tx.dc_i = (float)tx_probe.dc.re;
+        cal_tx.dc_q = (float)tx_probe.dc.im;
         SoapySDR_logf(SOAPY_SDR_INFO, "TX DC offset: I=%f Q=%f", cal_tx.dc_i, cal_tx.dc_q);
 
         cal_search_gain_phase(cal_tx, [&](const IqCal &trial) {
-            return cal_measure_loopback(trial, cal_rx).image;
+            return cal_measure_loopback(trial, cal_rx, CAL_SEARCH_BLOCKS).image;
         });
         cal_clamp_gain_phase(cal_tx, "TX");
         SoapySDR_logf(SOAPY_SDR_INFO, "TX I/Q correction: gain=%f phase=%f",
