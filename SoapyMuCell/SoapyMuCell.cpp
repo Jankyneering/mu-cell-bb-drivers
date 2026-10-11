@@ -1149,12 +1149,6 @@ public:
             SoapySDR_logf(SOAPY_SDR_DEBUG, "hwt snd_pcm_avail_delay: %d %ld %ld  pos: %ld", ret, pcm_avail, pcm_delay, stream->position);
             if (ret < 0) {
                 throw std::runtime_error("ALSA error");
-            } else if (pcm_delay < 0) {
-                // Underrun: the hardware is ahead of the application.
-                // Reporting a time beyond the last written sample would let
-                // clients schedule bursts into a future the stream cannot
-                // reach. Clamp to the last written position (issue #2).
-                return samples_to_timestamp(stream->position);
             } else {
                 return samples_to_timestamp(stream->position - (int64_t)pcm_delay);
             }
