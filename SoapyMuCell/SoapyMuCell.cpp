@@ -415,7 +415,7 @@ public:
                                                       pcm(NULL),
                                                       dir(dir),
                                                       stream_mode(STREAM_MODE_NORMAL),
-                                                      bool primed;
+                                                      primed(0),
                                                       setup_done(0),
                                                       activated(0),
                                                       position(0),
