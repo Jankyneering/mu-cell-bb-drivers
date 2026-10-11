@@ -975,13 +975,32 @@ public:
         // Number of samples to read.
         // snd_pcm_uframes_t is unsigned long. Clamp to its maximum value just in case.
         snd_pcm_uframes_t length = (snd_pcm_uframes_t)std::min(numElems, (size_t)ULONG_MAX);
-
         if (timeoutUs <= 0) {
             // Hack to make non-blocking read work:
             // limit number of samples to what is available right now.
             if (pcm_avail <= 0) {
                 length = 0;
             } else if ((snd_pcm_uframes_t)pcm_avail < length) {
+                length = (snd_pcm_uframes_t)pcm_avail;
+            }
+        } else {
+            // Positive timeout: wait up to timeoutUs for data, then read
+            // what is available (clamped, like the non-blocking case).
+            // Without this, snd_pcm_readi below blocks indefinitely and
+            // clients honoring the SoapySDR timeout contract deadlock
+            // (issue #2).
+            int ready = snd_pcm_wait(pcm, (int)(timeoutUs / 1000));
+            if (ready == 0) {
+                return 0; // timed out, no data yet
+            }
+            int avail_ret2 = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
+            if (avail_ret2 < 0) {
+                return alsa_error_to_soapy_rx(avail_ret2);
+            }
+            if (pcm_avail <= 0) {
+                return 0;
+            }
+            if ((snd_pcm_uframes_t)pcm_avail < length) {
                 length = (snd_pcm_uframes_t)pcm_avail;
             }
         }
