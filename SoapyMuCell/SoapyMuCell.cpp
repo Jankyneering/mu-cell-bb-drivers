@@ -504,7 +504,7 @@ public:
         ALSACHECK(snd_pcm_hw_params_set_channels(pcm, hwp, 2));
         ALSACHECK(snd_pcm_hw_params_set_buffer_size_near(pcm, hwp, &hwp_buffer_size));
         ALSACHECK(snd_pcm_hw_params_set_period_size_near(pcm, hwp, &hwp_period_size, 0));
-        ALSACHECK(snd_pcm_hw_params_get_periods(hwp, hwp_periods, 0));
+        ALSACHECK(snd_pcm_hw_params_get_periods(hwp, &hwp_periods, 0));
 
         ALSACHECK(snd_pcm_hw_params(pcm, hwp));
         snd_pcm_hw_params_free(hwp);
@@ -526,7 +526,7 @@ public:
             ALSACHECK(snd_pcm_sw_params_set_silence_size(pcm, swp, 0));
         }
 
-        ALSACHECK(snd_pcm_sw_params(swp));
+        ALSACHECK(snd_pcm_sw_params(pcm, swp));
         snd_pcm_sw_params_free(swp);
 
         ALSACHECK(reset());
