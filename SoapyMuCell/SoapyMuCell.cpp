@@ -941,6 +941,13 @@ public:
                 break;
 
             size_t n = numElems - buff_offset;
+
+            static std::atomic<int> alog{0};
+            if (alog.fetch_add(1) < 10)
+                SoapySDR_logf(SOAPY_SDR_ERROR,
+                              "readStream loop: avail=%ld n=%d",
+                              (long)pcm_avail, (int)(numElems - buff_offset));
+
             if (pcm_avail <= 0 || (size_t)pcm_avail < n) {
                 // Wait for more data, bounded by the requested timeout
                 // (-1 = indefinitely, like SoapySX when no timeout given).
