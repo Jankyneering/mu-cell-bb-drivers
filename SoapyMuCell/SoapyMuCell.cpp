@@ -5,6 +5,7 @@
 #include <SoapySDR/Registry.hpp>
 #include <SoapySDR/Time.hpp>
 
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <climits>
@@ -825,6 +826,9 @@ public:
             return SOAPY_SDR_STREAM_ERROR;
         }
         stream->activated = 1;
+        SoapySDR_logf(SOAPY_SDR_INFO, "activateStream: %s (mode %d, state %d)",
+                      stream->is_tx() ? "TX" : "RX",
+                      (int)stream->stream_mode, (int)snd_pcm_state(stream->pcm));
 
         if (stream->stream_mode == STREAM_MODE_NORMAL) {
             if (stream->is_tx() && !stream->primed) {
@@ -911,14 +915,25 @@ public:
 
         snd_pcm_t *pcm = stream->pcm;
 
+        static std::atomic<int> rlog{0};
+        if (rlog.fetch_add(1) < 10)
+            SoapySDR_logf(SOAPY_SDR_ERROR,
+                          "readStream: call %d numElems=%zu timeout=%ld avail=%ld delay=%ld",
+                          rlog.load(), numElems, timeoutUs, (long)pcm_avail, (long)pcm_delay);
+
         // If readStream is called before ALSA stream has been started,
         // it will get stuck forever in snd_pcm_wait.
         // Looks like this was the reason SoapyRemote did not work before.
         // Proper implementation of timeout might fix this too but that
         // might need replacing snd_pcm_wait with something more complicated.
         // For now, handle it by returning if the stream is not active.
-        if (!stream->activated)
+        if (!stream->activated) {
+            static std::atomic<int> nlog{0};
+            if (nlog.fetch_add(1) < 10)
+                SoapySDR_logf(SOAPY_SDR_ERROR,
+                              "readStream: RX NOT ACTIVATED (call %d)", nlog.load());
             return 0;
+        }
 
         snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
         int avail_ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
