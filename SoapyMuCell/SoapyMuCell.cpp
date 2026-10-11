@@ -1,24 +1,24 @@
 // SPDX-License-Identifier: MIT
 
 #include <SoapySDR/Device.hpp>
-#include <SoapySDR/Registry.hpp>
 #include <SoapySDR/Logger.hpp>
+#include <SoapySDR/Registry.hpp>
 #include <SoapySDR/Time.hpp>
 
-#include <string.h>
 #include <cassert>
-#include <climits>
 #include <chrono>
+#include <climits>
 #include <fstream>
-#include <thread>
 #include <mutex>
+#include <string.h>
+#include <thread>
 
 #include <fcntl.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
-#include <linux/types.h>
 #include <linux/gpio.h>
 #include <linux/spi/spidev.h>
+#include <linux/types.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 #include <alsa/asoundlib.h>
 #include <alsa/control.h>
@@ -33,7 +33,6 @@ extern const char *SoapyMuCell_commit;
 #define DEVICE_LABEL_STR "mucell"
 #define DEVICE_DRIVER_STR "mucell"
 #define REGISTER_STR "mucell"
-
 
 // Streaming mode, affecting how starting, stopping, overruns and underruns
 // are handled.
@@ -56,24 +55,21 @@ enum stream_mode {
 // and convert it to an integer.
 // The value is offset so that the minimum value becomes 0
 // and scaled so that step becomes 1.
-static int32_t scale_from_range(SoapySDR::Range range, double value)
-{
+static int32_t scale_from_range(SoapySDR::Range range, double value) {
     return (int)std::round(
-        (std::min(std::max(value, range.minimum()), range.maximum())
-         - range.minimum()) / range.step());
+        (std::min(std::max(value, range.minimum()), range.maximum()) - range.minimum()) / range.step());
 }
 
 // Inverse of scale_from_range.
-static double scale_to_range(SoapySDR::Range range, int32_t value)
-{
+static double scale_to_range(SoapySDR::Range range, int32_t value) {
     return std::min(std::max(
-        range.minimum() + range.step() * (double)value,
-        range.minimum()), range.maximum());
+                        range.minimum() + range.step() * (double)value,
+                        range.minimum()),
+                    range.maximum());
 }
 
 // Read a number from a file in format 0x1234.
-static uint16_t read_hex_file(const char *filename)
-{
+static uint16_t read_hex_file(const char *filename) {
     std::ifstream file(filename);
     std::string str;
     std::getline(file, str);
@@ -81,26 +77,25 @@ static uint16_t read_hex_file(const char *filename)
 }
 
 struct hat_info {
-    uint16_t  product_id;
-    uint16_t  product_ver;
-    bool      read_success;
-    EepromInfo eeprom;        // parsed + authenticated EEPROM data
+    uint16_t product_id;
+    uint16_t product_ver;
+    bool read_success;
+    EepromInfo eeprom; // parsed + authenticated EEPROM data
 };
 
-static struct hat_info read_hat_info(void)
-{
+static struct hat_info read_hat_info(void) {
     const uint16_t product_id_expected = 0x1255;
     // Default assumption if ID cannot be read
-    struct hat_info info = { product_id_expected, 0x0101, false, {} };
+    struct hat_info info = {product_id_expected, 0x0101, false, {}};
     try {
-        info.product_id  = read_hex_file("/proc/device-tree/hat/product_id");
-        info.product_ver = read_hex_file("/proc/device-tree/hat/product_ver");
+        info.product_id   = read_hex_file("/proc/device-tree/hat/product_id");
+        info.product_ver  = read_hex_file("/proc/device-tree/hat/product_ver");
         info.read_success = true;
         SoapySDR_logf(SOAPY_SDR_INFO, "Hardware version %d.%d",
-            info.product_ver >> 8, info.product_ver & 0xFF);
-    } catch(std::exception &e) {
+                      info.product_ver >> 8, info.product_ver & 0xFF);
+    } catch (std::exception &e) {
         SoapySDR_logf(SOAPY_SDR_WARNING, "Could not read HAT ID. Assuming hardware version %d.%d",
-            info.product_ver >> 8, info.product_ver & 0xFF);
+                      info.product_ver >> 8, info.product_ver & 0xFF);
     }
     if (info.product_id != product_id_expected) {
         SoapySDR_logf(SOAPY_SDR_WARNING, "Unexpected product ID 0x%04x. Are you sure the correct HAT is connected?", info.product_id);
@@ -113,35 +108,35 @@ static struct hat_info read_hat_info(void)
     SoapySDR_logf(SOAPY_SDR_INFO, "HAT EEPROM: %s", info.eeprom.summary().c_str());
 
     switch (info.eeprom.auth) {
-        case AuthResult::OK:
-            SoapySDR_logf(SOAPY_SDR_INFO,
-                "HAT authenticity: GENUINE - signed by key \"%s\"",  
-                info.eeprom.matched_key_name.c_str());
-            break;
-        case AuthResult::NO_SIGNATURE:
-            SoapySDR_logf(SOAPY_SDR_WARNING,
-                "HAT authenticity: unsigned EEPROM (no RSIG atom)");
-            break;
-        case AuthResult::KEY_NOT_FOUND:
-            SoapySDR_logf(SOAPY_SDR_WARNING,
-                "HAT authenticity: signature present but did NOT match any compiled-in key");
-            break;
-        case AuthResult::NO_KEYS:
-            SoapySDR_logf(SOAPY_SDR_WARNING,
-                "HAT authenticity: no public keys compiled in — rebuild with keys in public_keys/");
-            break;
-        case AuthResult::EEPROM_NOT_FOUND:
-            SoapySDR_logf(SOAPY_SDR_WARNING,
-                "HAT authenticity: EEPROM image not found in device tree");
-            break;
-        case AuthResult::VERIFY_ERROR:
-            SoapySDR_logf(SOAPY_SDR_ERROR,
-                "HAT authenticity: OpenSSL error during signature verification");
-            break;
-        case AuthResult::PARSE_ERROR:
-            SoapySDR_logf(SOAPY_SDR_WARNING,
-                "HAT authenticity: EEPROM image could not be parsed");
-            break;
+    case AuthResult::OK:
+        SoapySDR_logf(SOAPY_SDR_INFO,
+                      "HAT authenticity: GENUINE - signed by key \"%s\"",
+                      info.eeprom.matched_key_name.c_str());
+        break;
+    case AuthResult::NO_SIGNATURE:
+        SoapySDR_logf(SOAPY_SDR_WARNING,
+                      "HAT authenticity: unsigned EEPROM (no RSIG atom)");
+        break;
+    case AuthResult::KEY_NOT_FOUND:
+        SoapySDR_logf(SOAPY_SDR_WARNING,
+                      "HAT authenticity: signature present but did NOT match any compiled-in key");
+        break;
+    case AuthResult::NO_KEYS:
+        SoapySDR_logf(SOAPY_SDR_WARNING,
+                      "HAT authenticity: no public keys compiled in — rebuild with keys in public_keys/");
+        break;
+    case AuthResult::EEPROM_NOT_FOUND:
+        SoapySDR_logf(SOAPY_SDR_WARNING,
+                      "HAT authenticity: EEPROM image not found in device tree");
+        break;
+    case AuthResult::VERIFY_ERROR:
+        SoapySDR_logf(SOAPY_SDR_ERROR,
+                      "HAT authenticity: OpenSSL error during signature verification");
+        break;
+    case AuthResult::PARSE_ERROR:
+        SoapySDR_logf(SOAPY_SDR_WARNING,
+                      "HAT authenticity: EEPROM image could not be parsed");
+        break;
     }
 
     return info;
@@ -149,27 +144,23 @@ static struct hat_info read_hat_info(void)
 
 // Convert raw received samples to CF32.
 // TODO: Support other formats and add format as a parameter.
-static inline void convert_rx_buffer(const void *src, size_t src_offset, void *dest, size_t dest_offset, size_t length)
-{
-    const int32_t *src_ = (const int32_t*)src + src_offset*2;
-    float *dest_ = (float*)dest + dest_offset*2;
+static inline void convert_rx_buffer(const void *src, size_t src_offset, void *dest, size_t dest_offset, size_t length) {
+    const int32_t *src_ = (const int32_t *)src + src_offset * 2;
+    float *dest_        = (float *)dest + dest_offset * 2;
     const float scaling = 1.0f / 0x80000000L;
-    for (size_t i = 0; i < length*2; i++)
-    {
+    for (size_t i = 0; i < length * 2; i++) {
         dest_[i] = scaling * (float)src_[i];
     }
 }
 
 // Convert CF32 to raw transmit samples.
 // TODO: Support other formats and add format as a parameter.
-static inline void convert_tx_buffer(const void *src, size_t src_offset, void *dest, size_t dest_offset, size_t length, float tx_threshold2)
-{
-    const float *src_ = (const float*)src + src_offset*2;
-    int32_t *dest_ = (int32_t*)dest + dest_offset*2;
+static inline void convert_tx_buffer(const void *src, size_t src_offset, void *dest, size_t dest_offset, size_t length, float tx_threshold2) {
+    const float *src_   = (const float *)src + src_offset * 2;
+    int32_t *dest_      = (int32_t *)dest + dest_offset * 2;
     const float scaling = (float)0x7FFFFFFFL;
-    for (size_t i = 0; i < length*2; i+=2)
-    {
-        float fi = src_[i], fq = src_[i+1];
+    for (size_t i = 0; i < length * 2; i += 2) {
+        float fi = src_[i], fq = src_[i + 1];
         int32_t vi = scaling * std::max(std::min(fi, 1.0f), -1.0f);
         int32_t vq = scaling * std::max(std::min(fq, 1.0f), -1.0f);
         // Second lowest bit of each "I" sample controls RX/TX switching.
@@ -178,10 +169,10 @@ static inline void convert_tx_buffer(const void *src, size_t src_offset, void *d
         // for future extensions and keep them as 0.
         vi &= 0xFFFFFFFCL;
         vq &= 0xFFFFFFFCL;
-        if (fi*fi + fq*fq >= tx_threshold2)
+        if (fi * fi + fq * fq >= tx_threshold2)
             vi |= 0b11L;
-        dest_[i  ] = vi;
-        dest_[i+1] = vq;
+        dest_[i]     = vi;
+        dest_[i + 1] = vq;
     }
 }
 
@@ -195,7 +186,12 @@ static const uint8_t init_registers[N_INIT_REGISTERS] = {
     // 0x00: default value from datasheet (enable oscillator)
     0b00000001,
     // 0x01-0x06: RX and TX frequencies: 433.92 MHz
-    0xD8, 0xF5, 0xC3, 0xD8, 0xF5, 0xC3,
+    0xD8,
+    0xF5,
+    0xC3,
+    0xD8,
+    0xF5,
+    0xC3,
     // 0x07: read-only register, written value does not matter
     0x11,
     // 0x08: TX gains, default value from datasheet
@@ -221,9 +217,9 @@ static const uint8_t init_registers[N_INIT_REGISTERS] = {
     // 0x11: read-only register(?), written value does not matter
     0b00000000,
     // 0x12-0x13: I2S at 125 kHz: CLKOUT divider 4, decimate by 256
-    0b00100010, 0b00101100,
+    0b00100010,
+    0b00101100,
 };
-
 
 // Register values for a given sample rate
 struct sampleRateRegs {
@@ -243,19 +239,18 @@ struct sampleRateRegs {
 
 // Register values for different sample rates
 static const struct sampleRateRegs sample_rates[N_SAMPLE_RATES] = {
-    {1536, 0b0110, 0, 1, 6 },
-    { 768, 0b0100, 0, 1, 5 },
-    { 512, 0b0011, 0, 0, 6 },
+    {1536, 0b0110, 0, 1, 6},
+    {768, 0b0100, 0, 1, 5},
+    {512, 0b0011, 0, 0, 6},
     //{ 384, 0b0011, 0, 1, 4 }, // 24 bit samples (did not work correctly)
-    { 256, 0b0010, 0, 0, 5 },
+    {256, 0b0010, 0, 0, 5},
     //{ 192, 0b0010, 0, 1, 3 }, // 24 bit samples (did not work correctly)
-    { 128, 0b0001, 0, 0, 4 },
+    {128, 0b0001, 0, 0, 4},
     //{  96, 0b0001, 0, 1, 2 }, // 24 bit samples (did not work correctly)
-    {  64, 0b0000, 0, 0, 3 },
+    {64, 0b0000, 0, 0, 3},
     //{  48, 0b0000, 0, 1, 1 }, // 24 bit samples (did not work correctly)
     //{  32, 0b0000, 0, 0, 2 }, // 16 bit samples (did not work)
 };
-
 
 // Class to use SPI through the SPI userspace API (SPIDEV) in Linux.
 // Putting it in a separate class helps use RAII to ensure
@@ -266,8 +261,7 @@ private:
     int fd;
 
 public:
-    Spi(const char *spidev_path)
-    {
+    Spi(const char *spidev_path) {
         assert(spidev_path != NULL);
         fd = open(spidev_path, O_RDWR);
         SoapySDR_logf(SOAPY_SDR_DEBUG, "SPIDEV opened: %d", fd);
@@ -277,23 +271,21 @@ public:
         }
     }
 
-    ~Spi()
-    {
+    ~Spi() {
         SoapySDR_logf(SOAPY_SDR_DEBUG, "Closing SPIDEV fd %d", fd);
         close(fd);
     }
 
-    int transfer(const uint8_t *tx_data, uint8_t *rx_data, const size_t len) const
-    {
+    int transfer(const uint8_t *tx_data, uint8_t *rx_data, const size_t len) const {
         struct spi_ioc_transfer transfer;
         memset(&transfer, 0, sizeof(transfer));
 
-        transfer.tx_buf = (__u64)tx_data;
-        transfer.rx_buf = (__u64)rx_data;
-        transfer.len = (__u32)len;
+        transfer.tx_buf   = (__u64)tx_data;
+        transfer.rx_buf   = (__u64)rx_data;
+        transfer.len      = (__u32)len;
         transfer.speed_hz = 10000000;
 
-        int ret = ioctl(fd, SPI_IOC_MESSAGE(1), &transfer);
+        int ret           = ioctl(fd, SPI_IOC_MESSAGE(1), &transfer);
         SoapySDR_logf(SOAPY_SDR_DEBUG, "SPIDEV ioctl: %d", ret);
 
         if ((size_t)ret != len)
@@ -302,23 +294,19 @@ public:
         return ret;
     }
 
-    int transfer(const std::vector<uint8_t> &tx_data, std::vector<uint8_t> &rx_data) const
-    {
+    int transfer(const std::vector<uint8_t> &tx_data, std::vector<uint8_t> &rx_data) const {
         // Make sure data fits in both buffers
         const size_t transfer_len = std::min(tx_data.size(), rx_data.size());
         return transfer(tx_data.data(), rx_data.data(), transfer_len);
     }
 };
 
-
-
 // Similar to class Spi, but for GPIO pins.
 class GpioChip {
 public:
     int chip_fd;
 
-    GpioChip(const char *gpiochip_path)
-    {
+    GpioChip(const char *gpiochip_path) {
         assert(gpiochip_path != NULL);
         chip_fd = open(gpiochip_path, O_RDWR);
         if (chip_fd < 0) {
@@ -326,8 +314,7 @@ public:
         }
     }
 
-    ~GpioChip()
-    {
+    ~GpioChip() {
         close(chip_fd);
     }
 };
@@ -336,23 +323,22 @@ class GpioLine {
 public:
     int line_fd;
 
-    GpioLine(class GpioChip &chip, __u32 pin_number, const char *name, __u64 flags, bool initial_value)
-    {
+    GpioLine(class GpioChip &chip, __u32 pin_number, const char *name, __u64 flags, bool initial_value) {
         struct gpio_v2_line_request req = {
-            .offsets = { pin_number },
+            .offsets  = {pin_number},
             .consumer = "",
-            .config = (struct gpio_v2_line_config) {
-                .flags = flags,
+            .config   = (struct gpio_v2_line_config){
+                .flags     = flags,
                 .num_attrs = 0,
-                .padding = { },
-                .attrs = { },
+                .padding   = {},
+                .attrs     = {},
             },
-            .num_lines = 1,
+            .num_lines         = 1,
             .event_buffer_size = 0,
-            .padding = { },
-            .fd = 0,
+            .padding           = {},
+            .fd                = 0,
         };
-        strncpy(req.consumer, name, GPIO_MAX_NAME_SIZE-1);
+        strncpy(req.consumer, name, GPIO_MAX_NAME_SIZE - 1);
 
         int ret = ioctl(chip.chip_fd, GPIO_V2_GET_LINE_IOCTL, &req);
         if (ret < 0) {
@@ -364,13 +350,11 @@ public:
         set_value(initial_value);
     }
 
-    ~GpioLine()
-    {
+    ~GpioLine() {
         close(line_fd);
     }
 
-    void set_value(bool value)
-    {
+    void set_value(bool value) {
         struct gpio_v2_line_values val = {
             .bits = value,
             .mask = 1,
@@ -382,11 +366,8 @@ public:
     }
 };
 
-
-
 // Convert an ALSA recording error to a corresponding SoapySDR readStream error.
-static int alsa_error_to_soapy_rx(int alsa_error_code)
-{
+static int alsa_error_to_soapy_rx(int alsa_error_code) {
     if (alsa_error_code == -EPIPE) {
         // Overrun
         return SOAPY_SDR_OVERFLOW;
@@ -397,8 +378,7 @@ static int alsa_error_to_soapy_rx(int alsa_error_code)
 }
 
 // Convert an ALSA playback error to a corresponding SoapySDR writeStream error.
-static int alsa_error_to_soapy_tx(int alsa_error_code)
-{
+static int alsa_error_to_soapy_tx(int alsa_error_code) {
     if (alsa_error_code == -EPIPE) {
         // Underrun
         return SOAPY_SDR_UNDERFLOW;
@@ -408,12 +388,14 @@ static int alsa_error_to_soapy_tx(int alsa_error_code)
     }
 }
 
-
-#define ALSACHECK(a) do {\
-int retcheck = (a); \
-if (retcheck < 0) { \
-SoapySDR_logf(SOAPY_SDR_ERROR, "\nALSA error in %s: %s\n", #a, snd_strerror(retcheck)); \
-goto alsa_error; } } while(0)
+#define ALSACHECK(a)                                                                                \
+    do {                                                                                            \
+        int retcheck = (a);                                                                         \
+        if (retcheck < 0) {                                                                         \
+            SoapySDR_logf(SOAPY_SDR_ERROR, "\nALSA error in %s: %s\n", #a, snd_strerror(retcheck)); \
+            goto alsa_error;                                                                        \
+        }                                                                                           \
+    } while (0)
 
 class AlsaPcm {
 public:
@@ -428,25 +410,22 @@ public:
     snd_pcm_uframes_t hwp_period_size;
     snd_pcm_uframes_t hwp_buffer_size;
 
-    AlsaPcm(const char *name, snd_pcm_stream_t dir):
-        name(name),
-        pcm(NULL),
-        dir(dir),
-        stream_mode(STREAM_MODE_NORMAL),
-        setup_done(0),
-        activated(0),
-        position(0),
-        hwp_period_size(0),
-        hwp_buffer_size(0)
-    {
+    AlsaPcm(const char *name, snd_pcm_stream_t dir) : name(name),
+                                                      pcm(NULL),
+                                                      dir(dir),
+                                                      stream_mode(STREAM_MODE_NORMAL),
+                                                      setup_done(0),
+                                                      activated(0),
+                                                      position(0),
+                                                      hwp_period_size(0),
+                                                      hwp_buffer_size(0) {
     }
 
-    void open(void)
-    {
+    void open(void) {
         ALSACHECK(snd_pcm_open(&pcm, name, dir, 0));
         return;
 
-        alsa_error:
+    alsa_error:
         if (pcm != NULL)
             snd_pcm_close(pcm);
 
@@ -454,19 +433,16 @@ public:
         throw std::runtime_error("Error opening ALSA device");
     }
 
-    ~AlsaPcm()
-    {
+    ~AlsaPcm() {
         if (pcm != NULL)
             snd_pcm_close(pcm);
     }
 
-    bool is_tx(void)
-    {
+    bool is_tx(void) {
         return dir == SND_PCM_STREAM_PLAYBACK;
     }
 
-    int reset()
-    {
+    int reset() {
         int ret = 0;
         // Make sure stream is stopped. If it was stopped already,
         // drop will fail but that is fine, so do not check the return value.
@@ -476,12 +452,11 @@ public:
         if (ret < 0)
             return ret;
         position = 0;
-        ret = snd_pcm_reset(pcm);
+        ret      = snd_pcm_reset(pcm);
         return ret;
     }
 
-    void configure(snd_pcm_uframes_t period)
-    {
+    void configure(snd_pcm_uframes_t period) {
         if (pcm == NULL)
             return;
         snd_pcm_hw_params_t *hwp = NULL;
@@ -511,11 +486,10 @@ public:
         // Given these constraints, find the maximum possible buffer size
         // to achieve the period requested.
         const snd_pcm_uframes_t max_buffer_size = 65536;
-        hwp_period_size = std::min(hwp_period_size, max_buffer_size);
-        hwp_buffer_size = max_buffer_size / hwp_period_size * hwp_period_size;
+        hwp_period_size                         = std::min(hwp_period_size, max_buffer_size);
+        hwp_buffer_size                         = max_buffer_size / hwp_period_size * hwp_period_size;
 
-
-        snd_pcm_uframes_t swp_boundary = 0;
+        snd_pcm_uframes_t swp_boundary          = 0;
 
         ALSACHECK(snd_pcm_hw_params_malloc(&hwp));
         ALSACHECK(snd_pcm_hw_params_any(pcm, hwp));
@@ -566,12 +540,10 @@ public:
     }
 };
 
-
 /***********************************************************************
  * Device interface
  **********************************************************************/
-class SoapyMuCell : public SoapySDR::Device
-{
+class SoapyMuCell : public SoapySDR::Device {
 private:
     double masterClock;
     double sampleRate;
@@ -608,21 +580,18 @@ private:
     struct hat_info hat_info;
 
     // Convert a SoapySDR nanosecond timestamp to a sample counter.
-    int64_t timestamp_to_samples(long long timestamp) const
-    {
+    int64_t timestamp_to_samples(long long timestamp) const {
         return SoapySDR::timeNsToTicks(timestamp, sampleRate);
     }
 
     // Convert a sample counter to a SoapySDR nanosecond timestamp.
-    long long samples_to_timestamp(int64_t samples) const
-    {
+    long long samples_to_timestamp(int64_t samples) const {
         return SoapySDR::ticksToTimeNs(samples, sampleRate);
     }
 
     // Set given bits of a register.
     // The registers are not actually written to the chip.
-    void set_register_bits(size_t address, unsigned lowestbit, unsigned nbits, unsigned value)
-    {
+    void set_register_bits(size_t address, unsigned lowestbit, unsigned nbits, unsigned value) {
         if (address >= MAX_REGS)
             throw std::runtime_error("Invalid register address");
         unsigned mask = ((1 << nbits) - 1) << lowestbit;
@@ -631,8 +600,7 @@ private:
 
     // Get given bits of a cached register.
     // The registers are not actually read from the chip.
-    unsigned get_cached_register_bits(size_t address, unsigned lowestbit, unsigned nbits) const
-    {
+    unsigned get_cached_register_bits(size_t address, unsigned lowestbit, unsigned nbits) const {
         if (address >= MAX_REGS)
             throw std::runtime_error("Invalid register address");
         unsigned mask = ((1 << nbits) - 1) << lowestbit;
@@ -640,8 +608,7 @@ private:
     }
 
     // Write a range of registers to the chip.
-    void write_registers_to_chip(size_t firstreg, size_t nregs)
-    {
+    void write_registers_to_chip(size_t firstreg, size_t nregs) {
         if ((firstreg >= MAX_REGS) || (nregs > MAX_REGS) || (firstreg > MAX_REGS - nregs))
             throw std::runtime_error("Invalid register address");
 
@@ -656,8 +623,7 @@ private:
         spi.transfer(buf, buf);
     }
 
-    void reset_chip(void)
-    {
+    void reset_chip(void) {
         SoapySDR_logf(SOAPY_SDR_DEBUG, "Resetting chip");
         // Timing from datasheet Figure 6-2: Manual Reset Timing Diagram
         gpio_reset.set_value(1);
@@ -666,8 +632,7 @@ private:
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
-    void init_chip(void)
-    {
+    void init_chip(void) {
         for (size_t i = 0; i < N_INIT_REGISTERS; i++)
             set_register_bits(i, 0, 8, init_registers[i]);
         // Enable RX and TX, just for initial testing. This should be done somewhere else.
@@ -675,8 +640,7 @@ private:
         write_registers_to_chip(0, N_INIT_REGISTERS);
     }
 
-    bool does_synth_tune(double frequency)
-    {
+    bool does_synth_tune(double frequency) {
         setFrequency(SOAPY_SDR_RX, 0, frequency, {});
         setFrequency(SOAPY_SDR_TX, 0, frequency, {});
         // Give some time for PLL to lock
@@ -685,8 +649,7 @@ private:
         return (status_register & 3) == 3;
     }
 
-    void detect_clock(void)
-    {
+    void detect_clock(void) {
         // Try to detect whether SX1255 clock is 32 MHz or 38.4 MHz
         // by tuning near edges of tuning range.
         // First assume it is 32 MHz and try tuning accordingly.
@@ -696,7 +659,7 @@ private:
         bool tunes_high = does_synth_tune(510e6);
         // Synthesizers do not (hopefully) go down to 330 MHz, but
         // if clock is 38.4 MHz instead, they end up at 396 MHz.
-        bool tunes_low  = does_synth_tune(330e6);
+        bool tunes_low = does_synth_tune(330e6);
         if (tunes_low && (!tunes_high)) {
             SoapySDR_logf(SOAPY_SDR_INFO, "Detected clock as 38.4 MHz");
             masterClock = 38.4e6;
@@ -713,50 +676,45 @@ private:
         setFrequency(SOAPY_SDR_TX, 0, 433.92e6, {});
     }
 
-/***********************************************************************
- * Initialization and destruction
- **********************************************************************/
+    /***********************************************************************
+     * Initialization and destruction
+     **********************************************************************/
 
 public:
-    SoapyMuCell(const SoapySDR::Kwargs &args, struct hat_info hat_info):
-        masterClock(32.0e6),
-        sampleRate(125.0e3),
+    SoapyMuCell(const SoapySDR::Kwargs &args, struct hat_info hat_info) : masterClock(32.0e6),
+                                                                          sampleRate(125.0e3),
 
-        spi("/dev/spidev0.0"),
+                                                                          spi("/dev/spidev0.0"),
 
-        gpio("/dev/gpiochip0"),
-        gpio_reset(gpio,
-            5,
-            "SX reset",
-            GPIO_V2_LINE_FLAG_OUTPUT | GPIO_V2_LINE_FLAG_OPEN_SOURCE,
-            0
-        ),
-        gpio_rx(gpio,
-            23,
-            "SX RX",
-            GPIO_V2_LINE_FLAG_OUTPUT,
-            1
-        ),
-        gpio_tx(gpio,
-            22,
-            "SX TX",
-            GPIO_V2_LINE_FLAG_OUTPUT,
-            1
-        ),
+                                                                          gpio("/dev/gpiochip0"),
+                                                                          gpio_reset(gpio,
+                                                                                     5,
+                                                                                     "SX reset",
+                                                                                     GPIO_V2_LINE_FLAG_OUTPUT | GPIO_V2_LINE_FLAG_OPEN_SOURCE,
+                                                                                     0),
+                                                                          gpio_rx(gpio,
+                                                                                  23,
+                                                                                  "SX RX",
+                                                                                  GPIO_V2_LINE_FLAG_OUTPUT,
+                                                                                  1),
+                                                                          gpio_tx(gpio,
+                                                                                  22,
+                                                                                  "SX TX",
+                                                                                  GPIO_V2_LINE_FLAG_OUTPUT,
+                                                                                  1),
 
-        alsa_rx(AlsaPcm("hw:CARD=SX1255,DEV=1", SND_PCM_STREAM_CAPTURE)),
-        alsa_tx(AlsaPcm("hw:CARD=SX1255,DEV=0", SND_PCM_STREAM_PLAYBACK)),
-        tx_threshold2(0.0f),
-        linked(false),
-        regs{0},
+                                                                          alsa_rx(AlsaPcm("hw:CARD=SX1255,DEV=1", SND_PCM_STREAM_CAPTURE)),
+                                                                          alsa_tx(AlsaPcm("hw:CARD=SX1255,DEV=0", SND_PCM_STREAM_PLAYBACK)),
+                                                                          tx_threshold2(0.0f),
+                                                                          linked(false),
+                                                                          regs{0},
 
-        // Allocate reasonably large buffers by default.
-        // Their size will be increased if needed.
-        buffer_rx(8192),
-        buffer_tx(8192),
+                                                                          // Allocate reasonably large buffers by default.
+                                                                          // Their size will be increased if needed.
+                                                                          buffer_rx(8192),
+                                                                          buffer_tx(8192),
 
-        hat_info(hat_info)
-    {
+                                                                          hat_info(hat_info) {
         (void)args;
 
         SoapySDR_logf(SOAPY_SDR_INFO, "Initializing SoapyMuCell");
@@ -770,8 +728,7 @@ public:
         alsa_tx.open();
     }
 
-    ~SoapyMuCell(void)
-    {
+    ~SoapyMuCell(void) {
         SoapySDR_logf(SOAPY_SDR_INFO, "Uninitializing SoapyMuCell");
 
         // Put SX1255 to sleep
@@ -786,19 +743,17 @@ public:
         gpio_tx.set_value(0);
     }
 
-/***********************************************************************
- * Sample streams
- **********************************************************************/
+    /***********************************************************************
+     * Sample streams
+     **********************************************************************/
 
     SoapySDR::Stream *setupStream(
         const int direction,
-        const std::string & format,
-        const std::vector<size_t> & channels,
-        const SoapySDR::Kwargs & args
-    )
-    {
+        const std::string &format,
+        const std::vector<size_t> &channels,
+        const SoapySDR::Kwargs &args) {
         (void)channels; // Only one channel
-        (void)args; // Unused for now
+        (void)args;     // Unused for now
 
         std::scoped_lock lock(alsa_rx.mutex, alsa_tx.mutex);
 
@@ -806,8 +761,7 @@ public:
             throw std::runtime_error("Only CF32 format is currently supported");
         if (
             (snd_pcm_state(alsa_rx.pcm) == SND_PCM_STATE_RUNNING) ||
-            (snd_pcm_state(alsa_tx.pcm) == SND_PCM_STATE_RUNNING)
-        )
+            (snd_pcm_state(alsa_tx.pcm) == SND_PCM_STATE_RUNNING))
             throw std::runtime_error("Streams can be setup only if none of the streams are running");
 
         auto *stream = direction == SOAPY_SDR_RX ? &alsa_rx : &alsa_tx;
@@ -821,12 +775,12 @@ public:
             // Enable TX when magnitude of a sample exceeds a given threshold.
             float tx_threshold =
                 (args.count("threshold") > 0)
-                ? std::stof(args.at("threshold"))
-                : tx_threshold_default;
+                    ? std::stof(args.at("threshold"))
+                    : tx_threshold_default;
             tx_threshold2 = tx_threshold * tx_threshold;
         }
 
-        bool arg_link = (args.count("link") > 0 && args.at("link") == "1");
+        bool arg_link       = (args.count("link") > 0 && args.at("link") == "1");
         stream->stream_mode = arg_link ? STREAM_MODE_LINK : STREAM_MODE_NORMAL;
 
         stream->configure(args.count("period") > 0 ? std::stoul(args.at("period")) : 0);
@@ -846,21 +800,20 @@ public:
         throw std::runtime_error("ALSA error");
     }
 
-    void closeStream(SoapySDR::Stream * handle)
-    {
+    void closeStream(SoapySDR::Stream *handle) {
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         std::scoped_lock lock(stream->mutex);
         stream->setup_done = 0;
     }
 
     int activateStream(
-        SoapySDR::Stream * handle,
+        SoapySDR::Stream *handle,
         const int flags,
         const long long timeNs,
-        const size_t numElems
-    )
-    {
-        (void)flags; (void)timeNs; (void)numElems;
+        const size_t numElems) {
+        (void)flags;
+        (void)timeNs;
+        (void)numElems;
 
         std::scoped_lock rx_lock(alsa_rx.mutex, alsa_tx.mutex);
 
@@ -873,6 +826,28 @@ public:
 
         if (stream->stream_mode == STREAM_MODE_NORMAL) {
             if (snd_pcm_state(stream->pcm) == SND_PCM_STATE_PREPARED) {
+                if (stream->is_tx()) {
+                    // Prime the playback buffer with silence before starting.
+                    // Without this, the hardware runs ahead of the application
+                    // from the first frame (pcm_delay goes negative), which
+                    // inflates getHardwareTime into the future; clients that
+                    // schedule their first burst relative to that time can
+                    // never reconcile it with the stream position (issue #2).
+                    // Zeros are valid silence: the second-lowest bit of each
+                    // I sample drives the RF switch, so all-zero frames keep
+                    // the transmitter keyed off.
+                    std::vector<int32_t> silence(stream->hwp_buffer_size * 2);
+                    snd_pcm_sframes_t primed = snd_pcm_writei(
+                        stream->pcm, silence.data(), stream->hwp_buffer_size);
+                    if (primed < 0) {
+                        SoapySDR_logf(SOAPY_SDR_ERROR,
+                                      "TX priming failed: %s", snd_strerror(primed));
+                    } else {
+                        stream->position += primed;
+                        SoapySDR_logf(SOAPY_SDR_INFO,
+                                      "Primed TX buffer with %d frames of silence", (int)primed);
+                    }
+                }
                 ALSACHECK(snd_pcm_start(stream->pcm));
             }
         }
@@ -883,12 +858,11 @@ public:
     }
 
     int deactivateStream(
-        SoapySDR::Stream * handle,
+        SoapySDR::Stream *handle,
         const int flags,
-        const long long timeNs
-    )
-    {
-        (void)flags; (void)timeNs;
+        const long long timeNs) {
+        (void)flags;
+        (void)timeNs;
 
         std::scoped_lock rx_lock(alsa_rx.mutex, alsa_tx.mutex);
 
@@ -911,22 +885,19 @@ public:
         return SOAPY_SDR_STREAM_ERROR;
     }
 
-    size_t getStreamMTU(SoapySDR::Stream * handle) const
-    {
+    size_t getStreamMTU(SoapySDR::Stream *handle) const {
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         std::scoped_lock lock(stream->mutex);
         return stream->hwp_period_size;
     }
 
     int readStream(
-        SoapySDR::Stream * handle,
-        void *const * buffs,
+        SoapySDR::Stream *handle,
+        void *const *buffs,
         const size_t numElems,
-        int & flags,
-        long long & timeNs,
-        const long timeoutUs
-    )
-    {
+        int &flags,
+        long long &timeNs,
+        const long timeoutUs) {
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         std::scoped_lock lock(stream->mutex);
 
@@ -946,7 +917,6 @@ public:
         if (!stream->activated)
             return 0;
 
-
         snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
         int avail_ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
         if (avail_ret < 0) {
@@ -955,7 +925,6 @@ public:
             return alsa_error_to_soapy_rx(avail_ret);
         }
         SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_avail_delay: %d %ld %ld", avail_ret, pcm_avail, pcm_delay);
-
 
         // If number of available samples is more than the ALSA buffer size,
         // it means the buffer has overrun and old samples have been overwritten.
@@ -966,7 +935,7 @@ public:
             // so applications that use reads aligned to periods will stay aligned.
             // Add 1-2 extra periods for some margin.
             snd_pcm_uframes_t samples_to_skip = (overwritten / stream->hwp_period_size + 2) * stream->hwp_period_size;
-            snd_pcm_sframes_t forwarded = snd_pcm_forward(pcm, samples_to_skip);
+            snd_pcm_sframes_t forwarded       = snd_pcm_forward(pcm, samples_to_skip);
             if (forwarded >= 0) {
                 stream->position += forwarded;
                 pcm_avail -= forwarded;
@@ -978,7 +947,6 @@ public:
                 return alsa_error_to_soapy_rx((int)forwarded);
             }
         }
-
 
         // Number of samples to read.
         // snd_pcm_uframes_t is unsigned long. Clamp to its maximum value just in case.
@@ -1020,14 +988,12 @@ public:
     }
 
     int writeStream(
-        SoapySDR::Stream * handle,
-        const void *const * buffs,
+        SoapySDR::Stream *handle,
+        const void *const *buffs,
         const size_t numElems,
-        int & flags,
+        int &flags,
         long long timeNs,
-        const long timeoutUs
-    )
-    {
+        const long timeoutUs) {
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         std::scoped_lock lock(stream->mutex);
 
@@ -1037,7 +1003,7 @@ public:
         if (!stream->activated)
             return 0;
 
-        snd_pcm_t *pcm = stream->pcm;
+        snd_pcm_t *pcm              = stream->pcm;
 
         snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
         int avail_ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
@@ -1090,7 +1056,6 @@ public:
             }
         }
 
-
         // How much the stream should be forwarded
         // to get samples written to write_position.
         int64_t posdiff = write_position - stream->position;
@@ -1099,7 +1064,7 @@ public:
             // snd_pcm_sframes_t is long. Clamp to its maximum value just in case.
             snd_pcm_sframes_t samples_to_forward = (snd_pcm_sframes_t)std::min(posdiff, (int64_t)LONG_MAX);
 
-            snd_pcm_sframes_t forwardable = snd_pcm_forwardable(pcm);
+            snd_pcm_sframes_t forwardable        = snd_pcm_forwardable(pcm);
             if (forwardable < 0) {
                 // TODO: check if it can fail and think what to actually do here
                 SoapySDR_logf(SOAPY_SDR_ERROR, "tx snd_pcm_forwardable: %d", forwardable);
@@ -1124,7 +1089,6 @@ public:
             posdiff -= forwarded;
             pcm_avail -= forwarded;
         }
-
 
         if (timeoutUs <= 0) {
             // Hack to make non-blocking write work:
@@ -1157,8 +1121,7 @@ public:
         }
     }
 
-    long long getHardwareTime(const std::string &what) const
-    {
+    long long getHardwareTime(const std::string &what) const {
         if (what == "") {
             // RX and TX streams should give similar results here.
             //
@@ -1176,13 +1139,19 @@ public:
 
             auto *stream = &alsa_tx;
             std::scoped_lock lock(stream->mutex);
-            snd_pcm_t *pcm = stream->pcm;
+            snd_pcm_t *pcm              = stream->pcm;
 
             snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
             int ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
             SoapySDR_logf(SOAPY_SDR_DEBUG, "hwt snd_pcm_avail_delay: %d %ld %ld  pos: %ld", ret, pcm_avail, pcm_delay, stream->position);
             if (ret < 0) {
                 throw std::runtime_error("ALSA error");
+            } else if (pcm_delay < 0) {
+                // Underrun: the hardware is ahead of the application.
+                // Reporting a time beyond the last written sample would let
+                // clients schedule bursts into a future the stream cannot
+                // reach. Clamp to the last written position (issue #2).
+                return samples_to_timestamp(stream->position);
             } else {
                 return samples_to_timestamp(stream->position - (int64_t)pcm_delay);
             }
@@ -1191,13 +1160,13 @@ public:
         }
     }
 
-/***********************************************************************
- * Sample rates
- **********************************************************************/
+    /***********************************************************************
+     * Sample rates
+     **********************************************************************/
 
-    std::vector<double> listSampleRates(const int direction, const size_t channel) const
-    {
-        (void)direction; (void)channel;
+    std::vector<double> listSampleRates(const int direction, const size_t channel) const {
+        (void)direction;
+        (void)channel;
         std::vector<double> sampleRates;
         for (size_t i = 0; i < N_SAMPLE_RATES; i++) {
             sampleRates.push_back(masterClock / (double)sample_rates[i].div);
@@ -1206,11 +1175,10 @@ public:
     }
 
     // Wrapper for listSampleRates to support both methods
-    SoapySDR::RangeList getSampleRateRange(const int direction, const size_t channel) const
-    {
+    SoapySDR::RangeList getSampleRateRange(const int direction, const size_t channel) const {
         const auto sampleRates = listSampleRates(direction, channel);
         SoapySDR::RangeList ranges;
-        for (const auto sampleRate: sampleRates) {
+        for (const auto sampleRate : sampleRates) {
             ranges.push_back({sampleRate, sampleRate, 0});
         }
         return ranges;
@@ -1219,10 +1187,9 @@ public:
     void setSampleRate(
         const int direction,
         const size_t channel,
-        const double rate
-    )
-    {
-        (void)direction; (void)channel;
+        const double rate) {
+        (void)direction;
+        (void)channel;
 
         std::scoped_lock lock(reg_mutex);
 
@@ -1263,32 +1230,30 @@ public:
 
     double getSampleRate(
         const int direction,
-        const size_t channel
-    ) const
-    {
-        (void)direction; (void)channel;
+        const size_t channel) const {
+        (void)direction;
+        (void)channel;
         std::scoped_lock lock(reg_mutex);
         return sampleRate;
     }
 
-/***********************************************************************
- * Center frequency
- **********************************************************************/
+    /***********************************************************************
+     * Center frequency
+     **********************************************************************/
 
     void setFrequency(
         const int direction,
         const size_t channel,
         const double frequency,
-        const SoapySDR::Kwargs & args
-    )
-    {
-        (void)channel; (void)args;
+        const SoapySDR::Kwargs &args) {
+        (void)channel;
+        (void)args;
 
         std::scoped_lock lock(reg_mutex);
 
-        const double step = masterClock * (1.0 / (double)(1L<<20));
+        const double step        = masterClock * (1.0 / (double)(1L << 20));
         const uint32_t quantized = (uint32_t)scale_from_range(
-            SoapySDR::Range(0, step * (double)((1L<<24)-1), step),
+            SoapySDR::Range(0, step * (double)((1L << 24) - 1), step),
             frequency);
         if (direction == SOAPY_SDR_RX) {
             set_register_bits(0x01, 0, 8, quantized >> 16);
@@ -1305,35 +1270,29 @@ public:
 
     double getFrequency(
         const int direction,
-        const size_t channel
-    ) const
-    {
+        const size_t channel) const {
         (void)channel;
 
         std::scoped_lock lock(reg_mutex);
 
-        const double step = masterClock * (1.0 / (double)(1L<<20));
+        const double step = masterClock * (1.0 / (double)(1L << 20));
         if (direction == SOAPY_SDR_RX)
-            return step * (
-                (((uint32_t)regs[1]) << 16) |
-                (((uint32_t)regs[2]) << 8) |
-                 ((uint32_t)regs[3]));
+            return step * ((((uint32_t)regs[1]) << 16) |
+                           (((uint32_t)regs[2]) << 8) |
+                           ((uint32_t)regs[3]));
         else
-            return step * (
-                (((uint32_t)regs[4]) << 16) |
-                (((uint32_t)regs[5]) << 8) |
-                 ((uint32_t)regs[6]));
+            return step * ((((uint32_t)regs[4]) << 16) |
+                           (((uint32_t)regs[5]) << 8) |
+                           ((uint32_t)regs[6]));
     }
 
-/***********************************************************************
- * Gains
- **********************************************************************/
+    /***********************************************************************
+     * Gains
+     **********************************************************************/
 
     std::vector<std::string> listGains(
         const int direction,
-        const size_t channel
-    ) const
-    {
+        const size_t channel) const {
         (void)channel;
         if (direction == SOAPY_SDR_RX)
             return std::vector<std::string>{"LNA", "PGA"};
@@ -1344,16 +1303,14 @@ public:
     SoapySDR::Range getGainRange(
         const int direction,
         const size_t channel,
-        const std::string & name
-    ) const
-    {
+        const std::string &name) const {
         (void)channel;
         if (direction == SOAPY_SDR_RX) {
-            if (name == "LNA")   return {  0.0 , 48.0 , 6.0 };
-            if (name == "PGA")   return {  0.0 , 30.0 , 2.0 };
+            if (name == "LNA") return {0.0, 48.0, 6.0};
+            if (name == "PGA") return {0.0, 30.0, 2.0};
         } else {
-            if (name == "DAC")   return {  0.0 ,  9.0 , 3.0 };
-            if (name == "MIXER") return {  0.0 , 30.0 , 2.0 };
+            if (name == "DAC") return {0.0, 9.0, 3.0};
+            if (name == "MIXER") return {0.0, 30.0, 2.0};
         }
         return {0, 0, 0};
     }
@@ -1361,10 +1318,8 @@ public:
     void setGain(
         const int direction,
         const size_t channel,
-        const std::string & name,
-        const double value
-    )
-    {
+        const std::string &name,
+        const double value) {
         std::scoped_lock lock(reg_mutex);
 
         int32_t quantized = scale_from_range(getGainRange(direction, channel, name), value);
@@ -1373,7 +1328,7 @@ public:
                 // LNA gain does not have a constant step,
                 // so some extra logic is needed.
                 if (quantized <= 6) // -48 to -12 dB
-                    set_register_bits(0x0C, 5, 3, 6-quantized/2);
+                    set_register_bits(0x0C, 5, 3, 6 - quantized / 2);
                 else if (quantized == 7) // -6 dB
                     set_register_bits(0x0C, 5, 3, 2);
                 else // 0 dB
@@ -1397,16 +1352,14 @@ public:
     double getGain(
         const int direction,
         const size_t channel,
-        const std::string & name
-    ) const
-    {
+        const std::string &name) const {
         std::scoped_lock lock(reg_mutex);
 
         int32_t quantized = 0;
         if (direction == SOAPY_SDR_RX) {
             if (name == "LNA") {
                 const int32_t map[8] = {0, 8, 7, 6, 4, 2, 0, 0};
-                quantized = map[get_cached_register_bits(0x0C, 5, 3)];
+                quantized            = map[get_cached_register_bits(0x0C, 5, 3)];
             } else if (name == "PGA") {
                 quantized = get_cached_register_bits(0x0C, 1, 4);
             }
@@ -1423,9 +1376,7 @@ public:
     void setGain(
         const int direction,
         const size_t channel,
-        const double value
-    )
-    {
+        const double value) {
         std::scoped_lock lock(reg_mutex);
 
         if (direction == SOAPY_SDR_RX) {
@@ -1446,19 +1397,18 @@ public:
         }
     }
 
-/***********************************************************************
- * Antennas
- **********************************************************************/
+    /***********************************************************************
+     * Antennas
+     **********************************************************************/
 
-    std::vector<std::string> listAntennas(const int direction, const size_t channel) const
-    {
+    std::vector<std::string> listAntennas(const int direction, const size_t channel) const {
         (void)channel; // Only one channel
         std::vector<std::string> antennas;
         if (direction == SOAPY_SDR_RX) {
             antennas.push_back("RX");
             antennas.push_back("LB");
             // Digital loopback did not seem to work, so do not list it
-            //antennas.push_back("DLB");
+            // antennas.push_back("DLB");
         } else {
             antennas.push_back("TX");
             antennas.push_back("NONE");
@@ -1466,8 +1416,7 @@ public:
         return antennas;
     }
 
-    void setAntenna(const int direction, const size_t channel, const std::string &name)
-    {
+    void setAntenna(const int direction, const size_t channel, const std::string &name) {
         (void)channel;
         std::scoped_lock lock(reg_mutex);
 
@@ -1495,8 +1444,7 @@ public:
         }
     }
 
-    std::string getAntenna(const int direction, const size_t channel) const
-    {
+    std::string getAntenna(const int direction, const size_t channel) const {
         (void)channel;
         std::scoped_lock lock(reg_mutex);
 
@@ -1518,15 +1466,13 @@ public:
         }
     }
 
-/***********************************************************************
- * Other settings
- **********************************************************************/
+    /***********************************************************************
+     * Other settings
+     **********************************************************************/
 
     void writeSetting(
-        const std::string & key,
-        const std::string & value
-    )
-    {
+        const std::string &key,
+        const std::string &value) {
         // PA control modes
         if (key == "PA") {
             if (value == "ON") {
@@ -1547,16 +1493,14 @@ public:
 
     // TODO: readSetting, getSettingInfo
 
-/***********************************************************************
- * Low level interfaces
- **********************************************************************/
+    /***********************************************************************
+     * Low level interfaces
+     **********************************************************************/
 
     std::vector<unsigned> readRegisters(
-        const std::string & name,
+        const std::string &name,
         const unsigned addr,
-        const size_t length
-    ) const
-    {
+        const size_t length) const {
         (void)name; // Ignore name since there's only one register bank
         std::scoped_lock lock(reg_mutex);
 
@@ -1572,26 +1516,22 @@ public:
 
         std::vector<unsigned> result(length, 0);
         for (size_t i = 0; i < length; i++)
-            result[i] = buf[i+1];
+            result[i] = buf[i + 1];
 
         return result;
     }
 
     unsigned readRegister(
-        const std::string & name,
-        const unsigned addr
-    ) const
-    {
+        const std::string &name,
+        const unsigned addr) const {
         auto r = readRegisters(name, addr, 1);
         return r.at(0);
     }
 
     void writeRegisters(
-        const std::string & name,
+        const std::string &name,
         const unsigned addr,
-        const std::vector<unsigned> & value
-    )
-    {
+        const std::vector<unsigned> &value) {
         (void)name; // Ignore name since there's only one register bank
         std::scoped_lock lock(reg_mutex);
 
@@ -1602,40 +1542,34 @@ public:
     }
 
     void writeRegister(
-        const std::string & name,
+        const std::string &name,
         const unsigned addr,
-        const unsigned value
-    )
-    {
+        const unsigned value) {
         (void)name;
         std::scoped_lock lock(reg_mutex);
         set_register_bits(addr, 0, 8, value);
         write_registers_to_chip(addr, 1);
     }
 
-/***********************************************************************
- * Other hardware and driver information
- **********************************************************************/
+    /***********************************************************************
+     * Other hardware and driver information
+     **********************************************************************/
 
-    std::string getDriverKey(void) const
-    {
+    std::string getDriverKey(void) const {
         return DRIVER_KEY_STR;
     }
 
-    std::string getHardwareKey(void) const
-    {
+    std::string getHardwareKey(void) const {
         return HARDWARE_KEY_STR;
     }
 
-    SoapySDR::Kwargs getHardwareInfo(void) const
-    {
+    SoapySDR::Kwargs getHardwareInfo(void) const {
         SoapySDR::Kwargs args;
         args["soapysx_tag"]    = SoapyMuCell_tag;
         args["soapysx_commit"] = SoapyMuCell_commit;
 
         if (hat_info.read_success) {
-            args["hardware_version"] = std::to_string(hat_info.product_ver >> 8)
-                               + "." + std::to_string(hat_info.product_ver & 0xFF);
+            args["hardware_version"] = std::to_string(hat_info.product_ver >> 8) + "." + std::to_string(hat_info.product_ver & 0xFF);
         } else {
             args["hardware_version"] = "unknown";
         }
@@ -1652,29 +1586,34 @@ public:
 
         // Authenticity
         switch (e.auth) {
-            case AuthResult::OK:
-                args["eeprom_auth"]     = "genuine";
-                args["eeprom_auth_key"] = e.matched_key_name;
-                break;
-            case AuthResult::NO_SIGNATURE:
-                args["eeprom_auth"] = "unsigned";   break;
-            case AuthResult::KEY_NOT_FOUND:
-                args["eeprom_auth"] = "mismatch";   break;
-            case AuthResult::NO_KEYS:
-                args["eeprom_auth"] = "no_keys";    break;
-            case AuthResult::EEPROM_NOT_FOUND:
-                args["eeprom_auth"] = "not_found";  break;
-            case AuthResult::VERIFY_ERROR:
-                args["eeprom_auth"] = "error";      break;
-            case AuthResult::PARSE_ERROR:
-                args["eeprom_auth"] = "parse_error"; break;
+        case AuthResult::OK:
+            args["eeprom_auth"]     = "genuine";
+            args["eeprom_auth_key"] = e.matched_key_name;
+            break;
+        case AuthResult::NO_SIGNATURE:
+            args["eeprom_auth"] = "unsigned";
+            break;
+        case AuthResult::KEY_NOT_FOUND:
+            args["eeprom_auth"] = "mismatch";
+            break;
+        case AuthResult::NO_KEYS:
+            args["eeprom_auth"] = "no_keys";
+            break;
+        case AuthResult::EEPROM_NOT_FOUND:
+            args["eeprom_auth"] = "not_found";
+            break;
+        case AuthResult::VERIFY_ERROR:
+            args["eeprom_auth"] = "error";
+            break;
+        case AuthResult::PARSE_ERROR:
+            args["eeprom_auth"] = "parse_error";
+            break;
         }
 
         return args;
     }
 
-    size_t getNumChannels(const int direction) const
-    {
+    size_t getNumChannels(const int direction) const {
         (void)direction; // Same for both directions
         return 1;
     }
@@ -1682,26 +1621,24 @@ public:
     std::string getNativeStreamFormat(
         const int direction,
         const size_t channel,
-        double &fullScale
-    ) const
-    {
-        (void)direction; (void)channel;
+        double &fullScale) const {
+        (void)direction;
+        (void)channel;
         fullScale = 1.0;
         // This is not really the "native" format
         // but the only one currently supported.
         return "CF32";
     }
 
-    std::vector<std::string> getStreamFormats(const int direction, const size_t channel) const
-    {
-       (void)direction; (void)channel;
+    std::vector<std::string> getStreamFormats(const int direction, const size_t channel) const {
+        (void)direction;
+        (void)channel;
         std::vector<std::string> streamFormats;
         streamFormats.push_back("CF32");
         return streamFormats;
     }
 
-    bool hasHardwareTime(const std::string &what) const
-    {
+    bool hasHardwareTime(const std::string &what) const {
         if (what == "")
             return true;
         return false;
@@ -1711,15 +1648,14 @@ public:
 /***********************************************************************
  * Find available devices
  **********************************************************************/
-static SoapySDR::KwargsList findDevice(const SoapySDR::Kwargs &args)
-{
+static SoapySDR::KwargsList findDevice(const SoapySDR::Kwargs &args) {
     (void)args;
     SoapySDR::KwargsList devices;
 
     // TODO: check whether a device is actually found
 
     SoapySDR::Kwargs device;
-    device["label"] = DEVICE_LABEL_STR;
+    device["label"]  = DEVICE_LABEL_STR;
     device["driver"] = DEVICE_DRIVER_STR;
     devices.push_back(device);
 
@@ -1729,8 +1665,7 @@ static SoapySDR::KwargsList findDevice(const SoapySDR::Kwargs &args)
 /***********************************************************************
  * Make device instance
  **********************************************************************/
-static SoapySDR::Device *makeDevice(const SoapySDR::Kwargs &args)
-{
+static SoapySDR::Device *makeDevice(const SoapySDR::Kwargs &args) {
     SoapySDR::logf(SOAPY_SDR_INFO, "SoapyMuCell version %s %s", SoapyMuCell_tag, SoapyMuCell_commit);
     return new SoapyMuCell(args, read_hat_info());
 }
