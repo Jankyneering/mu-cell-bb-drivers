@@ -504,7 +504,7 @@ public:
         ALSACHECK(snd_pcm_hw_params_set_channels(pcm, hwp, 2));
         ALSACHECK(snd_pcm_hw_params_set_buffer_size_near(pcm, hwp, &hwp_buffer_size));
         ALSACHECK(snd_pcm_hw_params_set_period_size_near(pcm, hwp, &hwp_period_size, 0));
-        ALSACHECK(snd_pcm_hw_params_get_periods(hwp, &hwp_periods, 0));
+        ALSACHECK(snd_pcm_hw_params_get_periods(hwp, hwp_periods, 0));
 
         ALSACHECK(snd_pcm_hw_params(pcm, hwp));
         snd_pcm_hw_params_free(hwp);
@@ -526,7 +526,7 @@ public:
             ALSACHECK(snd_pcm_sw_params_set_silence_size(pcm, swp, 0));
         }
 
-        ALSACHECK(snd_pcm_sw_params(pcm, swp));
+        ALSACHECK(snd_pcm_sw_params(swp));
         snd_pcm_sw_params_free(swp);
 
         ALSACHECK(reset());
@@ -795,9 +795,7 @@ public:
         // (with an empty buffer) as soon as RX starts, which underruns
         // into corrupted stream accounting and hangs the first
         // avail_delay/read (issue #2).
-        if ((!linked) && alsa_rx.setup_done && alsa_tx.setup_done
-            && alsa_rx.stream_mode == STREAM_MODE_LINK
-            && alsa_tx.stream_mode == STREAM_MODE_LINK) {
+        if ((!linked) && alsa_rx.setup_done && alsa_tx.setup_done && alsa_rx.stream_mode == STREAM_MODE_LINK && alsa_tx.stream_mode == STREAM_MODE_LINK) {
             SoapySDR_logf(SOAPY_SDR_DEBUG, "Linking streams");
             ALSACHECK(snd_pcm_link(alsa_rx.pcm, alsa_tx.pcm));
             linked = 1;
@@ -901,7 +899,6 @@ public:
     size_t getStreamMTU(SoapySDR::Stream *handle) const {
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         std::scoped_lock lock(stream->mutex);
-        fprintf(stderr, "RS enter\n"); fflush(stderr);
         return stream->hwp_period_size;
     }
 
@@ -914,6 +911,8 @@ public:
         const long timeoutUs) {
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         std::scoped_lock lock(stream->mutex);
+        fprintf(stderr, "RS enter\n");
+        fflush(stderr);
 
         flags = 0;
 
@@ -945,11 +944,36 @@ public:
         int ret            = 0;
         while (buff_offset < numElems) {
             snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
-            fprintf(stderr, "RS loop\n"); fflush(stderr);
+            fprintf(stderr, "RS loop\n");
+            fflush(stderr);
             ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
-            fprintf(stderr, "RS avail ret=%d avail=%ld\n", ret, (long)pcm_avail); fflush(stderr);
+            fprintf(stderr, "RS avail ret=%d avail=%ld\n", ret, (long)pcm_avail);
+            fflush(stderr);
             if (ret < 0)
                 break;
+
+            // RX buffer overrun: hw_ptr ran ahead of the app because
+            // NORMAL mode's stop_threshold=boundary lets the stream run
+            // through overruns (only 0.34 s of buffer at 192 kHz, and the
+            // stack may not read for seconds during init). avail then
+            // exceeds the buffer size, and readi wedges on the runaway
+            // accounting. Skip to the live edge like the v1.0 driver did
+            // (issue #2): forward past the stale samples, then read fresh.
+            if (pcm_avail > (snd_pcm_sframes_t)stream->hwp_buffer_size) {
+                snd_pcm_uframes_t overwritten =
+                    (snd_pcm_uframes_t)pcm_avail - stream->hwp_buffer_size;
+                snd_pcm_uframes_t skip =
+                    (overwritten / stream->hwp_period_size + 2) * stream->hwp_period_size;
+                snd_pcm_sframes_t forwarded = snd_pcm_forward(pcm, skip);
+                if (forwarded < 0) {
+                    ret = (int)forwarded;
+                    break;
+                }
+                stream->position += forwarded;
+                SoapySDR_logf(SOAPY_SDR_WARNING,
+                              "RX overrun: skipped %d stale samples", (int)forwarded);
+                continue;
+            }
 
             size_t n = numElems - buff_offset;
 
@@ -989,7 +1013,7 @@ public:
         static std::atomic<int> rlog2{0};
         if (rlog2.fetch_add(1) < 10)
             SoapySDR_logf(SOAPY_SDR_ERROR, "readStream: returning %d", (int)buff_offset);
-        
+
         return buff_offset;
     }
 
@@ -1596,7 +1620,7 @@ public:
         double &fullScale) const {
         (void)direction;
         (void)channel;
-        fullScale = 1.0;
+        fullScale = 1;
         // This is not really the "native" format
         // but the only one currently supported.
         return "CF32";
