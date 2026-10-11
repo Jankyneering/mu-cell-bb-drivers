@@ -901,6 +901,7 @@ public:
     size_t getStreamMTU(SoapySDR::Stream *handle) const {
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         std::scoped_lock lock(stream->mutex);
+        fprintf(stderr, "RS enter\n"); fflush(stderr);
         return stream->hwp_period_size;
     }
 
@@ -944,7 +945,9 @@ public:
         int ret            = 0;
         while (buff_offset < numElems) {
             snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
+            fprintf(stderr, "RS loop\n"); fflush(stderr);
             ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
+            fprintf(stderr, "RS avail ret=%d avail=%ld\n", ret, (long)pcm_avail); fflush(stderr);
             if (ret < 0)
                 break;
 
