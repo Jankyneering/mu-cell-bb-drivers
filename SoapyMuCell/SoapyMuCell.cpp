@@ -406,6 +406,7 @@ public:
     enum stream_mode stream_mode;
     bool setup_done;
     bool activated;
+    bool primed;
     int64_t position;
     snd_pcm_uframes_t hwp_period_size;
     snd_pcm_uframes_t hwp_buffer_size;
@@ -414,6 +415,7 @@ public:
                                                       pcm(NULL),
                                                       dir(dir),
                                                       stream_mode(STREAM_MODE_NORMAL),
+                                                      bool primed;
                                                       setup_done(0),
                                                       activated(0),
                                                       position(0),
@@ -825,29 +827,30 @@ public:
         stream->activated = 1;
 
         if (stream->stream_mode == STREAM_MODE_NORMAL) {
-            if (snd_pcm_state(stream->pcm) == SND_PCM_STATE_PREPARED) {
-                if (stream->is_tx()) {
-                    // Prime the playback buffer with silence before starting.
-                    // Without this, the hardware runs ahead of the application
-                    // from the first frame (pcm_delay goes negative), which
-                    // inflates getHardwareTime into the future; clients that
-                    // schedule their first burst relative to that time can
-                    // never reconcile it with the stream position (issue #2).
-                    // Zeros are valid silence: the second-lowest bit of each
-                    // I sample drives the RF switch, so all-zero frames keep
-                    // the transmitter keyed off.
-                    std::vector<int32_t> silence(stream->hwp_buffer_size * 2);
-                    snd_pcm_sframes_t primed = snd_pcm_writei(
-                        stream->pcm, silence.data(), stream->hwp_buffer_size);
-                    if (primed < 0) {
-                        SoapySDR_logf(SOAPY_SDR_ERROR,
-                                      "TX priming failed: %s", snd_strerror(primed));
-                    } else {
-                        stream->position += primed;
-                        SoapySDR_logf(SOAPY_SDR_INFO,
-                                      "Primed TX buffer with %d frames of silence", (int)primed);
-                    }
+            if (stream->is_tx() && !stream->primed) {
+                // Prime the playback buffer with silence. RX and TX PCMs are
+                // linked, so starting RX (activated first by most clients)
+                // also starts TX with an empty buffer: the underrun opens
+                // immediately, pcm_delay goes negative and getHardwareTime
+                // reads far into the future (issue #2). Prime regardless of
+                // PCM state: writei on a RUNNING stream fills available space,
+                // which during the underrun is the whole buffer. Zeros are
+                // valid silence (the RF switch bit is clear).
+                std::vector<int32_t> silence(stream->hwp_buffer_size * 2);
+                snd_pcm_sframes_t primed = snd_pcm_writei(
+                    stream->pcm, silence.data(), stream->hwp_buffer_size);
+                if (primed < 0) {
+                    SoapySDR_logf(SOAPY_SDR_ERROR,
+                                  "TX priming failed: %s", snd_strerror(primed));
+                } else {
+                    stream->position += primed;
+                    stream->primed = 1;
+                    SoapySDR_logf(SOAPY_SDR_INFO,
+                                  "Primed TX with %d frames of silence (state %d)",
+                                  (int)primed, (int)snd_pcm_state(stream->pcm));
                 }
+            }
+            if (snd_pcm_state(stream->pcm) == SND_PCM_STATE_PREPARED) {
                 ALSACHECK(snd_pcm_start(stream->pcm));
             }
         }
