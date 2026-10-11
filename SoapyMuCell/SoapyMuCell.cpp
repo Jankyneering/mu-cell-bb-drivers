@@ -790,8 +790,14 @@ public:
 
         stream->setup_done = 1;
 
-        // Always link RX and TX PCMs if both have been setup.
-        if ((!linked) && alsa_rx.setup_done && alsa_tx.setup_done) {
+        // Link RX and TX PCMs only in LINK mode. In NORMAL mode the
+        // application manages timing via timestamps; linking starts TX
+        // (with an empty buffer) as soon as RX starts, which underruns
+        // into corrupted stream accounting and hangs the first
+        // avail_delay/read (issue #2).
+        if ((!linked) && alsa_rx.setup_done && alsa_tx.setup_done
+            && alsa_rx.stream_mode == STREAM_MODE_LINK
+            && alsa_tx.stream_mode == STREAM_MODE_LINK) {
             SoapySDR_logf(SOAPY_SDR_DEBUG, "Linking streams");
             ALSACHECK(snd_pcm_link(alsa_rx.pcm, alsa_tx.pcm));
             linked = 1;
