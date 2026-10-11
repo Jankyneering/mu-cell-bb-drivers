@@ -910,6 +910,12 @@ public:
 
         flags = 0;
 
+        static std::atomic<int> rlog{0};
+        if (rlog.fetch_add(1) < 10)
+            SoapySDR_logf(SOAPY_SDR_ERROR,
+                          "readStream: call %d numElems=%zu timeout=%ld",
+                          rlog.load(), numElems, timeoutUs);
+
         if (stream->is_tx())
             throw std::runtime_error("Wrong direction");
 
@@ -961,6 +967,11 @@ public:
             return SOAPY_SDR_OVERFLOW;
         if (ret < 0)
             return SOAPY_SDR_STREAM_ERROR;
+
+        static std::atomic<int> rlog2{0};
+        if (rlog2.fetch_add(1) < 10)
+            SoapySDR_logf(SOAPY_SDR_ERROR, "readStream: returning %d", (int)buff_offset);
+        
         return buff_offset;
     }
 
@@ -976,6 +987,12 @@ public:
 
         if (!stream->is_tx())
             throw std::runtime_error("Wrong direction");
+
+        static std::atomic<int> wlog{0};
+        if (wlog.fetch_add(1) < 10)
+            SoapySDR_logf(SOAPY_SDR_ERROR,
+                          "writeStream: call %d numElems=%zu flags=%d timeNs=%lld",
+                          wlog.load(), numElems, flags, timeNs);
 
         if (!stream->activated)
             return 0;
@@ -1080,6 +1097,13 @@ public:
             snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
             int ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
             SoapySDR_logf(SOAPY_SDR_DEBUG, "hwt snd_pcm_avail_delay: %d %ld %ld  pos: %ld", ret, pcm_avail, pcm_delay, stream->position);
+
+            static std::atomic<int> hlog{0};
+            if (hlog.fetch_add(1) < 10)
+                SoapySDR_logf(SOAPY_SDR_ERROR,
+                              "getHardwareTime: pos=%ld delay=%ld",
+                              (long)stream->position, (long)pcm_delay);
+
             if (ret < 0) {
                 throw std::runtime_error("ALSA error");
             } else {
