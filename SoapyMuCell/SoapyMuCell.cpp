@@ -1153,9 +1153,17 @@ public:
             std::scoped_lock lock(stream->mutex);
             snd_pcm_t *pcm              = stream->pcm;
 
-            snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
-            int ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
-            SoapySDR_logf(SOAPY_SDR_DEBUG, "hwt snd_pcm_avail_delay: %d %ld %ld  pos: %ld", ret, pcm_avail, pcm_delay, stream->position);
+            snd_pcm_sframes_t pcm_avail = 0;
+            // Same wedging status ioctl as the read path (issue #2): use
+            // snd_pcm_avail_update and approximate the playback delay as
+            // the filled part of the buffer.
+            pcm_avail = snd_pcm_avail_update(pcm);
+            if (pcm_avail < 0)
+                throw std::runtime_error("ALSA error");
+            snd_pcm_sframes_t pcm_delay =
+                (snd_pcm_sframes_t)stream->hwp_buffer_size - pcm_avail;
+            if (pcm_delay < 0)
+                pcm_delay = 0;
 
             static std::atomic<int> hlog{0};
             if (hlog.fetch_add(1) < 10)
@@ -1163,11 +1171,7 @@ public:
                               "getHardwareTime: pos=%ld delay=%ld",
                               (long)stream->position, (long)pcm_delay);
 
-            if (ret < 0) {
-                throw std::runtime_error("ALSA error");
-            } else {
-                return samples_to_timestamp(stream->position - (int64_t)pcm_delay);
-            }
+            return samples_to_timestamp(stream->position - (int64_t)pcm_delay);
         } else {
             throw std::runtime_error("Unsupported time");
         }
