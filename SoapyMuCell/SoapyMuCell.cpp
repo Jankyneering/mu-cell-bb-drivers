@@ -918,8 +918,8 @@ public:
         static std::atomic<int> rlog{0};
         if (rlog.fetch_add(1) < 10)
             SoapySDR_logf(SOAPY_SDR_ERROR,
-                          "readStream: call %d numElems=%zu timeout=%ld avail=%ld delay=%ld",
-                          rlog.load(), numElems, timeoutUs, (long)pcm_avail, (long)pcm_delay);
+                          "readStream: call %d numElems=%zu timeout=%ld",
+                          rlog.load(), numElems, timeoutUs);
 
         // If readStream is called before ALSA stream has been started,
         // it will get stuck forever in snd_pcm_wait.
