@@ -941,8 +941,6 @@ public:
             pcm_avail = snd_pcm_avail_update(pcm);
             pcm_delay = 0;
             ret       = (pcm_avail < 0) ? (int)pcm_avail : 0;
-            fprintf(stderr, "RS avail ret=%d avail=%ld\n", ret, (long)pcm_avail);
-            fflush(stderr);
 
             if (ret < 0)
                 break;
