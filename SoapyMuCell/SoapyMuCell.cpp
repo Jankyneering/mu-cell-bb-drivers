@@ -915,6 +915,12 @@ public:
 
         snd_pcm_t *pcm = stream->pcm;
 
+        static std::atomic<int> wlog{0};
+        if (wlog.fetch_add(1) < 10)
+            SoapySDR_logf(SOAPY_SDR_ERROR,
+                          "writeStream: call %d numElems=%zu flags=%d timeNs=%lld timeout=%ld",
+                          wlog.load(), numElems, flags, timeNs, timeoutUs);
+
         static std::atomic<int> rlog{0};
         if (rlog.fetch_add(1) < 10)
             SoapySDR_logf(SOAPY_SDR_ERROR,
@@ -985,6 +991,9 @@ public:
 
         if (length > 0) {
             snd_pcm_sframes_t samples_read = snd_pcm_readi(pcm, buffer_rx.data(), length);
+            static std::atomic<int> rlog2{0};
+            if (rlog2.fetch_add(1) < 10)
+                SoapySDR_logf(SOAPY_SDR_ERROR, "readStream: readi -> %d", (int)samples_read);
             if (samples_read >= 0) {
                 timeNs = samples_to_timestamp(stream->position);
                 flags |= SOAPY_SDR_HAS_TIME;
@@ -1079,6 +1088,10 @@ public:
         int64_t posdiff = write_position - stream->position;
 
         while (posdiff > 0) {
+            static std::atomic<int> plog{0};
+            if (plog.fetch_add(1) < 10)
+                SoapySDR_logf(SOAPY_SDR_ERROR,
+                              "writeStream: catch-up posdiff=%lld", (long long)posdiff);
             // snd_pcm_sframes_t is long. Clamp to its maximum value just in case.
             snd_pcm_sframes_t samples_to_forward = (snd_pcm_sframes_t)std::min(posdiff, (int64_t)LONG_MAX);
 
