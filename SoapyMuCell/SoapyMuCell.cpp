@@ -913,8 +913,10 @@ public:
         static std::atomic<int> rlog{0};
         if (rlog.fetch_add(1) < 10)
             SoapySDR_logf(SOAPY_SDR_ERROR,
-                          "readStream: call %d numElems=%zu timeout=%ld",
-                          rlog.load(), numElems, timeoutUs);
+                          "readStream: call %d numElems=%zu timeout=%ld dir=%s activated=%d state=%d",
+                          rlog.load(), numElems, timeoutUs,
+                          stream->is_tx() ? "TX" : "RX", (int)stream->activated,
+                          (int)snd_pcm_state(stream->pcm));
 
         if (stream->is_tx())
             throw std::runtime_error("Wrong direction");
@@ -998,8 +1000,8 @@ public:
         static std::atomic<int> wlog{0};
         if (wlog.fetch_add(1) < 10)
             SoapySDR_logf(SOAPY_SDR_ERROR,
-                          "writeStream: call %d numElems=%zu flags=%d timeNs=%lld",
-                          wlog.load(), numElems, flags, timeNs);
+                          "writeStream: call %d numElems=%zu flags=%d timeNs=%lld activated=%d",
+                          wlog.load(), numElems, flags, timeNs, (int)stream->activated);
 
         if (!stream->activated)
             return 0;
