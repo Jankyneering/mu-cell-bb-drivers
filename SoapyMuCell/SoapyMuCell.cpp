@@ -913,124 +913,55 @@ public:
         if (stream->is_tx())
             throw std::runtime_error("Wrong direction");
 
+        // Always report the timestamp of the next sample, like SoapySX:
+        // rust-soapysdr clients detect timestamp availability by change,
+        // and the stack anchors initial_time from it (issue #2).
+        timeNs = samples_to_timestamp(stream->position);
+        flags |= SOAPY_SDR_HAS_TIME;
+
+        if (!stream->activated)
+            return 0;
+
         snd_pcm_t *pcm = stream->pcm;
+        if (numElems * 2 > buffer_rx.size())
+            buffer_rx.resize(numElems * 2);
 
-        static std::atomic<int> wlog{0};
-        if (wlog.fetch_add(1) < 10)
-            SoapySDR_logf(SOAPY_SDR_ERROR,
-                          "writeStream: call %d numElems=%zu flags=%d timeNs=%lld timeout=%ld",
-                          wlog.load(), numElems, flags, timeNs, timeoutUs);
+        size_t buff_offset = 0;
+        int ret            = 0;
+        while (buff_offset < numElems) {
+            snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
+            ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
+            if (ret < 0)
+                break;
 
-        static std::atomic<int> rlog{0};
-        if (rlog.fetch_add(1) < 10)
-            SoapySDR_logf(SOAPY_SDR_ERROR,
-                          "readStream: call %d numElems=%zu timeout=%ld",
-                          rlog.load(), numElems, timeoutUs);
+            size_t n = numElems - buff_offset;
+            if (pcm_avail <= 0 || (size_t)pcm_avail < n) {
+                // Wait for more data, bounded by the requested timeout
+                // (-1 = indefinitely, like SoapySX when no timeout given).
+                int wait_ms = (timeoutUs > 0) ? (int)(timeoutUs / 1000) : -1;
+                ret         = snd_pcm_wait(pcm, wait_ms);
+                if (ret == 0)
+                    break; // timed out; return what we have
+                if (ret < 0)
+                    break;
+                continue;
+            }
 
-        // If readStream is called before ALSA stream has been started,
-        // it will get stuck forever in snd_pcm_wait.
-        // Looks like this was the reason SoapyRemote did not work before.
-        // Proper implementation of timeout might fix this too but that
-        // might need replacing snd_pcm_wait with something more complicated.
-        // For now, handle it by returning if the stream is not active.
-        if (!stream->activated) {
-            static std::atomic<int> nlog{0};
-            if (nlog.fetch_add(1) < 10)
-                SoapySDR_logf(SOAPY_SDR_ERROR,
-                              "readStream: RX NOT ACTIVATED (call %d)", nlog.load());
-            return 0;
+            snd_pcm_sframes_t samples_read = snd_pcm_readi(pcm, buffer_rx.data(), n);
+            if (samples_read < 0) {
+                ret = (int)samples_read;
+                break;
+            }
+            convert_rx_buffer(buffer_rx.data(), 0, buffs[0], buff_offset, samples_read);
+            buff_offset += samples_read;
+            stream->position += samples_read;
         }
 
-        snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
-        int avail_ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
-        if (avail_ret < 0) {
-            // TODO: check if it can fail and think what to actually do here
-            SoapySDR_logf(SOAPY_SDR_ERROR, "rx snd_pcm_avail_delay: %d", avail_ret);
-            return alsa_error_to_soapy_rx(avail_ret);
-        }
-        SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_avail_delay: %d %ld %ld", avail_ret, pcm_avail, pcm_delay);
-
-        // If number of available samples is more than the ALSA buffer size,
-        // it means the buffer has overrun and old samples have been overwritten.
-        // Skip these samples.
-        if (pcm_avail > (snd_pcm_sframes_t)stream->hwp_buffer_size) {
-            snd_pcm_uframes_t overwritten = (snd_pcm_uframes_t)pcm_avail - stream->hwp_buffer_size;
-            // Round the number of samples to skip to a multiple of period size,
-            // so applications that use reads aligned to periods will stay aligned.
-            // Add 1-2 extra periods for some margin.
-            snd_pcm_uframes_t samples_to_skip = (overwritten / stream->hwp_period_size + 2) * stream->hwp_period_size;
-            snd_pcm_sframes_t forwarded       = snd_pcm_forward(pcm, samples_to_skip);
-            if (forwarded >= 0) {
-                stream->position += forwarded;
-                pcm_avail -= forwarded;
-
-                SoapySDR_logf(SOAPY_SDR_WARNING, "RX buffer overrun. Skipped %u samples", forwarded);
-            } else {
-                // TODO: check if it can fail and think what to actually do here
-                SoapySDR_logf(SOAPY_SDR_ERROR, "rx snd_pcm_forward: %d", forwarded);
-                return alsa_error_to_soapy_rx((int)forwarded);
-            }
-        }
-
-        // Number of samples to read.
-        // snd_pcm_uframes_t is unsigned long. Clamp to its maximum value just in case.
-        snd_pcm_uframes_t length = (snd_pcm_uframes_t)std::min(numElems, (size_t)ULONG_MAX);
-        if (timeoutUs <= 0) {
-            // Hack to make non-blocking read work:
-            // limit number of samples to what is available right now.
-            if (pcm_avail <= 0) {
-                length = 0;
-            } else if ((snd_pcm_uframes_t)pcm_avail < length) {
-                length = (snd_pcm_uframes_t)pcm_avail;
-            }
-        } else {
-            // Positive timeout: wait up to timeoutUs for data, then read
-            // what is available (clamped, like the non-blocking case).
-            // Without this, snd_pcm_readi below blocks indefinitely and
-            // clients honoring the SoapySDR timeout contract deadlock
-            // (issue #2).
-            int ready = snd_pcm_wait(pcm, (int)(timeoutUs / 1000));
-            if (ready == 0) {
-                return 0; // timed out, no data yet
-            }
-            int avail_ret2 = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
-            if (avail_ret2 < 0) {
-                return alsa_error_to_soapy_rx(avail_ret2);
-            }
-            if (pcm_avail <= 0) {
-                return 0;
-            }
-            if ((snd_pcm_uframes_t)pcm_avail < length) {
-                length = (snd_pcm_uframes_t)pcm_avail;
-            }
-        }
-
-        if (length > buffer_rx.size())
-            buffer_rx.resize(length);
-
-        if (length > 0) {
-            snd_pcm_sframes_t samples_read = snd_pcm_readi(pcm, buffer_rx.data(), length);
-            static std::atomic<int> rlog2{0};
-            if (rlog2.fetch_add(1) < 10)
-                SoapySDR_logf(SOAPY_SDR_ERROR, "readStream: readi -> %d", (int)samples_read);
-            if (samples_read >= 0) {
-                timeNs = samples_to_timestamp(stream->position);
-                flags |= SOAPY_SDR_HAS_TIME;
-
-                stream->position += samples_read;
-
-                assert((size_t)samples_read <= buffer_rx.size());
-                assert((size_t)samples_read <= numElems);
-                convert_rx_buffer(buffer_rx.data(), 0, buffs[0], 0, samples_read);
-
-                return (int)samples_read;
-            } else {
-                return alsa_error_to_soapy_rx((int)samples_read);
-            }
-        } else {
-            // Nothing to read
-            return 0;
-        }
+        if (ret == -EPIPE) // Overrun
+            return SOAPY_SDR_OVERFLOW;
+        if (ret < 0)
+            return SOAPY_SDR_STREAM_ERROR;
+        return buff_offset;
     }
 
     int writeStream(
@@ -1050,125 +981,80 @@ public:
             return 0;
 
         snd_pcm_t *pcm              = stream->pcm;
-
         snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
-        int avail_ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
-        if (avail_ret < 0) {
-            // TODO: check if it can fail and think what to actually do here
-            SoapySDR_logf(SOAPY_SDR_ERROR, "tx snd_pcm_avail_delay: %d", avail_ret);
-            return alsa_error_to_soapy_tx(avail_ret);
-        }
-        SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_avail_delay: %d %ld %ld", avail_ret, pcm_avail, pcm_delay);
+        int ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
+        if (ret < 0)
+            return alsa_error_to_soapy_tx(ret);
 
-        // Current position where stream is being "played",
-        // similar to getHardwareTime:
         int64_t playback_position = stream->position - (int64_t)pcm_delay;
-
-        // Position where samples are going to be written
         int64_t write_position;
 
-        // Number of samples to write.
-        // snd_pcm_uframes_t is unsigned long. Clamp to its maximum value just in case.
-        snd_pcm_uframes_t length = (snd_pcm_uframes_t)std::min(numElems, (size_t)ULONG_MAX);
-
         if (flags & SOAPY_SDR_HAS_TIME) {
-            // Timestamp provided.
-            // Write to the position corresponding to the timestamp.
             write_position = timestamp_to_samples(timeNs);
-            // If timestamp is in the past, quietly discard the samples.
-            // It might be more "correct" to return SOAPY_SDR_TIME_ERROR instead,
-            // but seems like discarding is a common behavior with other SDRs, so
-            // I am worried some applications might not properly handle the error code.
-            int64_t diff = playback_position - write_position;
-            if (diff > 0) {
-                // Timestamp is in the past.
-                // Do nothing but pretend all samples were written.
-                SoapySDR_logf(SOAPY_SDR_WARNING, "Discarding TX %d samples in the past", diff);
-                return (int)length;
+            if (playback_position - write_position > 0) {
+                // Timestamp in the past: discard, pretend written
+                return (int)numElems;
             }
         } else {
-            // No timestamp provided.
-            // Continue writing from where last write ended.
             write_position = stream->position;
-            // If TX buffer has underrun, skip to a future position.
-            // Round the number of samples to skip to a multiple of period size,
-            // so applications that use writes aligned to periods will stay aligned.
-            // Add 1-2 extra periods for some margin.
-            int64_t diff = playback_position - write_position;
-            if (diff > 0) {
-                diff = (diff / (int64_t)stream->hwp_period_size + 2) * (int64_t)stream->hwp_period_size;
-                write_position += diff;
-                SoapySDR_logf(SOAPY_SDR_WARNING, "TX buffer underrun. Forwarding TX stream by %d samples", diff);
-            }
         }
 
-        // How much the stream should be forwarded
-        // to get samples written to write_position.
+        // Forward the stream to write_position, blocking as needed
+        // like SoapySX.
         int64_t posdiff = write_position - stream->position;
-
         while (posdiff > 0) {
-            static std::atomic<int> plog{0};
-            if (plog.fetch_add(1) < 10)
-                SoapySDR_logf(SOAPY_SDR_ERROR,
-                              "writeStream: catch-up posdiff=%lld", (long long)posdiff);
-            // snd_pcm_sframes_t is long. Clamp to its maximum value just in case.
-            snd_pcm_sframes_t samples_to_forward = (snd_pcm_sframes_t)std::min(posdiff, (int64_t)LONG_MAX);
-
-            snd_pcm_sframes_t forwardable        = snd_pcm_forwardable(pcm);
-            if (forwardable < 0) {
-                // TODO: check if it can fail and think what to actually do here
-                SoapySDR_logf(SOAPY_SDR_ERROR, "tx snd_pcm_forwardable: %d", forwardable);
-                return alsa_error_to_soapy_tx((int)forwardable);
-            }
-
-            snd_pcm_sframes_t forwarded;
-            if (samples_to_forward < forwardable) {
-                forwarded = snd_pcm_forward(pcm, samples_to_forward);
-            } else {
-                // Forward as much as possible, then wait for more space
-                forwarded = snd_pcm_forward(pcm, forwardable);
-                snd_pcm_wait(pcm, -10001);
-            }
-
-            if (forwarded < 0) {
-                // TODO: check if it can fail and think what to actually do here
-                SoapySDR_logf(SOAPY_SDR_ERROR, "tx snd_pcm_forward: %d", forwarded);
-                return alsa_error_to_soapy_tx((int)forwarded);
-            }
-            stream->position += forwarded;
-            posdiff -= forwarded;
-            pcm_avail -= forwarded;
-        }
-
-        if (timeoutUs <= 0) {
-            // Hack to make non-blocking write work:
-            // limit number of samples to the amount of space in the buffer now.
-
-            if (pcm_avail <= 0) {
-                length = 0;
-            } else if ((snd_pcm_uframes_t)pcm_avail < length) {
-                length = (snd_pcm_uframes_t)pcm_avail;
+            snd_pcm_sframes_t forwardable = snd_pcm_forwardable(pcm);
+            if (forwardable < 0)
+                return SOAPY_SDR_STREAM_ERROR;
+            if (posdiff < (int64_t)forwardable)
+                forwardable = snd_pcm_forward(pcm, (snd_pcm_sframes_t)posdiff);
+            else
+                forwardable = snd_pcm_forward(pcm, forwardable);
+            if (forwardable < 0)
+                return SOAPY_SDR_STREAM_ERROR;
+            stream->position += forwardable;
+            posdiff -= forwardable;
+            if (posdiff > 0) {
+                int w = snd_pcm_wait(pcm, (timeoutUs > 0) ? (int)(timeoutUs / 1000) : -1);
+                if (w == 0)
+                    return 0; // timed out
+                if (w < 0)
+                    return SOAPY_SDR_STREAM_ERROR;
             }
         }
 
-        if (length > buffer_tx.size())
-            buffer_tx.resize(length);
-
-        convert_tx_buffer(buffs[0], 0, buffer_tx.data(), 0, length, tx_threshold2);
-
-        if (length > 0) {
-            snd_pcm_sframes_t samples_written = snd_pcm_writei(pcm, buffer_tx.data(), length);
-            if (samples_written >= 0) {
-                // Successful write
-                stream->position += samples_written;
-                return (int)samples_written;
-            } else {
-                return alsa_error_to_soapy_tx((int)samples_written);
+        // Write until the full buffer is in, blocking like SoapySX.
+        if (numElems * 2 > buffer_tx.size())
+            buffer_tx.resize(numElems * 2);
+        size_t buff_offset = 0;
+        while (buff_offset < numElems) {
+            ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
+            if (ret < 0)
+                break;
+            size_t n = numElems - buff_offset;
+            if (pcm_avail <= 0 || (size_t)pcm_avail < n) {
+                ret = snd_pcm_wait(pcm, (timeoutUs > 0) ? (int)(timeoutUs / 1000) : -1);
+                if (ret == 0)
+                    break; // timed out; return partial
+                if (ret < 0)
+                    break;
+                continue;
             }
-        } else {
-            // Nothing to write
-            return 0;
+            convert_tx_buffer(buffs[0], buff_offset, buffer_tx.data(), 0, n, tx_threshold2);
+            snd_pcm_sframes_t written = snd_pcm_writei(pcm, buffer_tx.data(), n);
+            if (written < 0) {
+                ret = (int)written;
+                break;
+            }
+            buff_offset += written;
+            stream->position += written;
         }
+
+        if (ret == -EPIPE) // Underrun
+            return SOAPY_SDR_UNDERFLOW;
+        if (ret < 0)
+            return SOAPY_SDR_STREAM_ERROR;
+        return buff_offset;
     }
 
     long long getHardwareTime(const std::string &what) const {
