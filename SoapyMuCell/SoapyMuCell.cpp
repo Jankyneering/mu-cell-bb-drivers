@@ -946,9 +946,17 @@ public:
             snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
             fprintf(stderr, "RS loop\n");
             fflush(stderr);
-            ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
+
+            // snd_pcm_avail_delay issues a status/hwsync ioctl that wedges
+            // on this kernel while the capture stream is overruning (issue #2).
+            // arecord (readi -> snd_pcm_avail_update) works fine on the same
+            // stream; use the pure hw_ptr arithmetic instead.
+            pcm_avail = snd_pcm_avail_update(pcm);
+            pcm_delay = 0;
+            ret       = (pcm_avail < 0) ? (int)pcm_avail : 0;
             fprintf(stderr, "RS avail ret=%d avail=%ld\n", ret, (long)pcm_avail);
             fflush(stderr);
+
             if (ret < 0)
                 break;
 
@@ -1041,9 +1049,16 @@ public:
 
         snd_pcm_t *pcm              = stream->pcm;
         snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
-        int ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
-        if (ret < 0)
-            return alsa_error_to_soapy_tx(ret);
+        // Avoid the status ioctl (see readStream): approximate the queued
+        // delay as the filled part of the buffer, which for playback is
+        // buffer_size - free_space.
+        pcm_avail = snd_pcm_avail_update(pcm);
+        if (pcm_avail < 0)
+            return alsa_error_to_soapy_tx((int)pcm_avail);
+        pcm_delay = (snd_pcm_sframes_t)(stream->hwp_buffer_size - (snd_pcm_uframes_t)pcm_avail);
+        if (pcm_delay < 0)
+            pcm_delay = 0;
+        int ret                   = 0;
 
         int64_t playback_position = stream->position - (int64_t)pcm_delay;
         int64_t write_position;
@@ -1087,9 +1102,11 @@ public:
             buffer_tx.resize(numElems * 2);
         size_t buff_offset = 0;
         while (buff_offset < numElems) {
-            ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
-            if (ret < 0)
+            pcm_avail = snd_pcm_avail_update(pcm);
+            if (pcm_avail < 0) {
+                ret = (int)pcm_avail;
                 break;
+            }
             size_t n = numElems - buff_offset;
             if (pcm_avail <= 0 || (size_t)pcm_avail < n) {
                 ret = snd_pcm_wait(pcm, (timeoutUs > 0) ? (int)(timeoutUs / 1000) : -1);
