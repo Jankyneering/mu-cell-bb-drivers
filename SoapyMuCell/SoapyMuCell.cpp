@@ -5,7 +5,6 @@
 #include <SoapySDR/Registry.hpp>
 #include <SoapySDR/Time.hpp>
 
-#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <climits>
@@ -911,18 +910,8 @@ public:
         const long timeoutUs) {
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         std::scoped_lock lock(stream->mutex);
-        fprintf(stderr, "RS enter\n");
-        fflush(stderr);
 
         flags = 0;
-
-        static std::atomic<int> rlog{0};
-        if (rlog.fetch_add(1) < 10)
-            SoapySDR_logf(SOAPY_SDR_ERROR,
-                          "readStream: call %d numElems=%zu timeout=%ld dir=%s activated=%d state=%d",
-                          rlog.load(), numElems, timeoutUs,
-                          stream->is_tx() ? "TX" : "RX", (int)stream->activated,
-                          (int)snd_pcm_state(stream->pcm));
 
         if (stream->is_tx())
             throw std::runtime_error("Wrong direction");
@@ -944,8 +933,6 @@ public:
         int ret            = 0;
         while (buff_offset < numElems) {
             snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
-            fprintf(stderr, "RS loop\n");
-            fflush(stderr);
 
             // snd_pcm_avail_delay issues a status/hwsync ioctl that wedges
             // on this kernel while the capture stream is overruning (issue #2).
@@ -985,12 +972,6 @@ public:
 
             size_t n = numElems - buff_offset;
 
-            static std::atomic<int> alog{0};
-            if (alog.fetch_add(1) < 10)
-                SoapySDR_logf(SOAPY_SDR_ERROR,
-                              "readStream loop: avail=%ld n=%d",
-                              (long)pcm_avail, (int)(numElems - buff_offset));
-
             if (pcm_avail <= 0 || (size_t)pcm_avail < n) {
                 // Wait for more data, bounded by the requested timeout
                 // (-1 = indefinitely, like SoapySX when no timeout given).
@@ -1018,10 +999,6 @@ public:
         if (ret < 0)
             return SOAPY_SDR_STREAM_ERROR;
 
-        static std::atomic<int> rlog2{0};
-        if (rlog2.fetch_add(1) < 10)
-            SoapySDR_logf(SOAPY_SDR_ERROR, "readStream: returning %d", (int)buff_offset);
-
         return buff_offset;
     }
 
@@ -1037,12 +1014,6 @@ public:
 
         if (!stream->is_tx())
             throw std::runtime_error("Wrong direction");
-
-        static std::atomic<int> wlog{0};
-        if (wlog.fetch_add(1) < 10)
-            SoapySDR_logf(SOAPY_SDR_ERROR,
-                          "writeStream: call %d numElems=%zu flags=%d timeNs=%lld activated=%d",
-                          wlog.load(), numElems, flags, timeNs, (int)stream->activated);
 
         if (!stream->activated)
             return 0;
@@ -1164,12 +1135,6 @@ public:
                 (snd_pcm_sframes_t)stream->hwp_buffer_size - pcm_avail;
             if (pcm_delay < 0)
                 pcm_delay = 0;
-
-            static std::atomic<int> hlog{0};
-            if (hlog.fetch_add(1) < 10)
-                SoapySDR_logf(SOAPY_SDR_ERROR,
-                              "getHardwareTime: pos=%ld delay=%ld",
-                              (long)stream->position, (long)pcm_delay);
 
             return samples_to_timestamp(stream->position - (int64_t)pcm_delay);
         } else {
